@@ -107,6 +107,7 @@ tbody tr[data-compra]:hover{background:var(--soft)}
 .kv dt{color:var(--muted)} .kv dd{margin:0}
 
 .kpi{gap:6px}
+.kpi .big{white-space:nowrap;font-size:clamp(18px,1.65vw,26px)}
 .kpi .lab{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--muted)}
 .kpi .foot{display:flex;justify-content:space-between;align-items:flex-end;gap:8px}
 .kpi .delta{font-size:12px;font-weight:600}
@@ -143,6 +144,12 @@ form .fields.fac-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
 .opt.best{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
 .opt .nm{flex:1 1 180px;min-width:0}
 .opt .amt{flex:0 0 auto;text-align:right}
+.pcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.pcard{background:var(--soft);border-radius:14px;border-top:3px solid var(--line);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.prow{display:flex;flex-direction:column;gap:4px}
+.pbar{position:relative;height:26px;border-radius:8px;background:var(--line);overflow:hidden}
+.pbar i{position:absolute;left:0;top:0;bottom:0;border-radius:8px;opacity:.9}
+.pbar b{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--ink);text-shadow:0 1px 2px rgba(0,0,0,.6)}
 .track{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:6px}
 .track i{display:block;height:8px;border-radius:99px}
 
@@ -319,7 +326,7 @@ function autorizar() { carpeta_(); adjuntos_(); Logger.log('Listo: carpeta ' + C
 <script>
 "use strict";
 /* ============ Estado ============ */
-const S = { empresa:{}, portales:{}, proveedores:[], compras:[], depositos:[], facturas:[], unidades:[] };
+const S = { empresa:{}, portales:{}, proveedores:[], compras:[], depositos:[], facturas:[], unidades:[], ventas:[] };
 let idb = null, dirHandle = null, fileNeedsPerm = false, lastBackup = "", lastFileSave = "", localSaved = "", syncing = false;
 let modalOpen = false, pendingRender = false;
 const loaded = {};
@@ -348,6 +355,7 @@ const normOp = s => String(s||"").replace(/[^0-9a-z]/gi,"").replace(/^0+/,"").to
 const normAcc = s => String(s||"").replace(/[^0-9]/g,"");
 
 function toast(msg, ms=3200){
+  $$(".toast").forEach(x=>x.remove());
   const t=document.createElement("div"); t.className="toast"; t.textContent=msg; document.body.appendChild(t);
   setTimeout(()=>t.remove(), ms);
 }
@@ -364,8 +372,16 @@ const toGal=(q,u)=> u==="kg"?num(q)/glpF():num(q);
 /* cantidad en la unidad de presentación: líquidos en gal; GLP en kg (o gal si se elige) */
 function qDisp(prod,q,u,glpU){ if(!isGlp(prod)) return {q:toGal(q,u), u:"gal"}; const t=glpU||"kg"; return {q:t==="kg"?toKg(q,u):toGal(q,u), u:t}; }
 /* precios: se guardan con IGV; percepción aparte (del proveedor) */
+/* Precios referenciales (siempre CON impuestos, 4 decimales):
+   - Líquidos: el precio del proveedor ya trae sus impuestos; la percepción del proveedor se suma aparte para el depósito.
+   - GLP: con impuestos = sin impuestos × 1.18 (IGV) × (1 + percepción); la percepción ya va dentro del precio. */
+const money4 = n => "S/ " + num(n).toLocaleString("es-PE",{minimumFractionDigits:4,maximumFractionDigits:4});
+const glpSinImp=(p,pct)=>num(p)/(1.18*(1+num(pct)/100));
+const glpConImp=(v,pct)=>num(v)*1.18*(1+num(pct)/100);
 const precioSinImp=p=>num(p)/1.18;
 const precioConPer=(p,pct)=>num(p)*(1+num(pct)/100);
+/* percepción de una cotización: en líquidos se suma; en GLP ya está incluida en el precio */
+function percCot(lines,pct){ let add=0, incl=0; lines.forEach(l=>{ const imp=num(l.importe); if(isGlp(l.producto)) incl+=imp-imp/(1+num(pct)/100); else add+=imp*num(pct)/100; }); return {add:r2(add), incl:r2(incl)}; }
 function saldoProveedor(pid){
   const p = prov(pid) || {};
   const dep = S.depositos.filter(d=>d.proveedorId===pid).reduce((a,d)=>a+num(d.monto),0);
@@ -376,7 +392,7 @@ function depositosCompra(cid){ return S.depositos.filter(d=>d.compraId===cid).re
 function facturasCompra(cid){ return S.facturas.filter(f=>f.compraId===cid); }
 
 /* ============ Base de datos local (IndexedDB en este equipo) ============ */
-const COLS=["proveedores","compras","depositos","facturas","unidades"];
+const COLS=["proveedores","compras","depositos","facturas","unidades","ventas"];
 const genId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 function openIDB(){ return new Promise((res,rej)=>{ const r=indexedDB.open("control-combustible",1);
   r.onupgradeneeded=()=>{ const d=r.result; if(!d.objectStoreNames.contains("kv")) d.createObjectStore("kv"); if(!d.objectStoreNames.contains("files")) d.createObjectStore("files"); };
@@ -386,7 +402,7 @@ const idbGet=(st,k)=>idbReq(st,"readonly",o=>o.get(k));
 const idbPut=(st,k,v)=>idbReq(st,"readwrite",o=>o.put(v,k));
 const idbDel=(st,k)=>idbReq(st,"readwrite",o=>o.delete(k));
 const idbKeys=st=>idbReq(st,"readonly",o=>o.getAllKeys());
-function snapshot(){ return {app:"control-combustible", version:1, guardado:new Date().toISOString(), empresa:S.empresa, portales:S.portales, proveedores:S.proveedores, compras:S.compras, depositos:S.depositos, facturas:S.facturas, unidades:S.unidades}; }
+function snapshot(){ return {app:"control-combustible", version:1, guardado:new Date().toISOString(), empresa:S.empresa, portales:S.portales, proveedores:S.proveedores, compras:S.compras, depositos:S.depositos, facturas:S.facturas, unidades:S.unidades, ventas:S.ventas}; }
 let saveTimer=null;
 async function persist(){
   const snap=snapshot(); localSaved=snap.guardado;
@@ -538,6 +554,7 @@ const ROUTES = [
   {id:"compras", t:"Compras", i:"truck"},
   {id:"depositos", t:"Depósitos", i:"wallet"},
   {id:"facturas", t:"Facturas", i:"doc"},
+  {id:"ventas", t:"Ventas de GLP", i:"sale"},
   {id:"reportes", t:"Reportes", i:"chart"},
   {sep:"Portales"},
   {id:"portales", t:"OSINERGMIN · SCOP · Primax", i:"link"},
@@ -573,7 +590,7 @@ function paintBrand(){
 function render(){
   paintNav();
   const v = $("#view"), r = route();
-  const fn = {resumen:vResumen, nueva:vNueva, compras:vCompras, depositos:vDepositos, facturas:vFacturas, portales:vPortales, proveedores:vProveedores, empresa:vEmpresa, reportes:vReportes, respaldo:vRespaldo, comparar:vComparar, unidades:vUnidades}[r];
+  const fn = {resumen:vResumen, nueva:vNueva, compras:vCompras, depositos:vDepositos, facturas:vFacturas, portales:vPortales, proveedores:vProveedores, empresa:vEmpresa, reportes:vReportes, respaldo:vRespaldo, comparar:vComparar, unidades:vUnidades, ventas:vVentas}[r];
   v.innerHTML = fn();
   bind[r] && bind[r](v);
 }
@@ -589,6 +606,8 @@ function buildAlerts(){
     const dep = depositosCompra(c.id);
     if(dep < num(c.montoDepositar)-0.01) out.push({lvl:"warn", t:`Compra del ${fdate(c.fecha)} a ${esc(provName(c.proveedorId))}: faltan ${money(num(c.montoDepositar)-dep)} por depositar.`, go:"#compras"});
   });
+  S.ventas.filter(v=>v.estado!=="Anulada"&&v.scop&&v.scop.codigo&&v.scop.estado!=="cerrado").forEach(v=>out.push({lvl:"warn", t:`Venta de GLP del ${fdate(v.fecha)} a ${esc((v.cliente&&v.cliente.nombre)||"cliente")}: el SCOP de venta ${esc(v.scop.codigo)} no está cerrado.`, go:"#ventas"}));
+  S.ventas.filter(v=>v.estado!=="Anulada"&&v.scop&&!v.scop.codigo).forEach(v=>out.push({lvl:"warn", t:`Venta de GLP del ${fdate(v.fecha)}: falta el código SCOP de venta.`, go:"#ventas"}));
   S.proveedores.forEach(p=>(p.productos||[]).forEach(pr=>{
     if(!num(pr.precio)) out.push({lvl:"warn", t:`Falta el precio referencial de ${esc(pr.nombre)} en ${esc(p.nombre)}.`, go:"#proveedores"});
     else if(pr.actualizado && daysBetween(pr.actualizado, today())>7) out.push({lvl:"warn", t:`Precio de ${esc(pr.nombre)} (${esc(p.nombre)}) sin actualizar desde ${fdate(pr.actualizado)}.`, go:"#proveedores"});
@@ -616,6 +635,7 @@ const ICONS={
  menu:'<path d="M4 7h16M4 12h16M4 17h16"/>',
  cloud:'<path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19.5 11 3.5 3.5 0 0 1 18 18z"/>',
  install:'<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+ sale:'<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/>',
 };
 const ic=(n,col="currentColor",s=19,sw=2)=>`<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]||""}</svg>`;
 const EXTRA_COL=["#4ADE80","#F97316","#38BDF8","#FACC15","#F472B6","#A3E635"];
@@ -710,6 +730,25 @@ function priceSeries(prod){
 
 /* ============ Vistas ============ */
 const RES={prod:""};
+/* Precios de hoy: una tarjeta por producto con todos los proveedores, del más barato al más caro */
+function preciosHoyHtml(){
+  const prods=knownProducts().filter(prod=>S.proveedores.some(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); return x&&num(x.precio)>0; }));
+  if(!prods.length) return '<div class="empty">Registra los precios de tus proveedores en Proveedores y precios para ver la comparación.</div>';
+  return `<div class="pcards">${prods.map(prod=>{
+    const u=isGlp(prod)?"kg":"gal";
+    const rows=S.proveedores.map(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); if(!x) return null; const v=precioEn(x,u); if(!v) return null;
+      const h=[...(p.historial||[])].filter(z=>z.producto===prod&&num(z.anterior)>0).sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha))).pop();
+      const prevV=h&&Math.abs(num(h.precio)-num(x.precio))<0.00005?num(h.anterior):null;
+      return {p, v, d:x.actualizado, prev:prevV!==null?precioEn({...x,precio:prevV},u):null}; }).filter(Boolean).sort((a,b)=>a.v-b.v);
+    const mn=rows[0].v, mx=rows.at(-1).v, varios=rows.length>1;
+    return `<div class="pcard" style="border-top-color:${pcol(prod)}"><div class="row between"><b>${esc(prod)}</b><span class="small muted">S/ por ${u}, con impuestos</span></div>
+      ${rows.map((r,i)=>{ const w=varios&&mx>mn?40+60*(r.v-mn)/(mx-mn):100, best=varios&&i===0, old=!r.d||daysBetween(r.d,today())>7, ch=r.prev!==null?r.v-r.prev:null;
+        return `<div class="prow"><div class="row between small"><span>${esc(r.p.nombre)}</span><span>${best?'<span class="pill p-ok">Más barato</span>':varios?`<span class="p-bad">+${(r.v-mn).toFixed(4)}</span>`:""}</span></div>
+        <div class="pbar"><i style="width:${w.toFixed(1)}%;background:${best?"var(--ok)":"var(--accent)"}"></i><b class="mono">${money4(r.v)}</b></div>
+        <div class="small muted">${ch!==null&&Math.abs(ch)>=0.00005?`<span style="color:${ch>0?"var(--bad)":"var(--ok)"}">${ch>0?"▲ subió":"▼ bajó"} ${Math.abs(ch).toFixed(4)}</span> · `:""}<span class="${old?"p-warn":""}">${r.d?"al "+fdate(r.d):"sin fecha"}${old?" · revisar":""}</span></div></div>`; }).join("")}
+      ${varios?`<div class="small" style="border-top:1px solid var(--line);padding-top:8px">Diferencia: <b class="mono">${(mx-mn).toFixed(4)}</b> por ${u} · <b>${money((mx-mn)*1000)}</b> cada 1,000 ${u}</div>`:'<div class="small muted">Solo un proveedor tiene este precio.</div>'}
+    </div>`; }).join("")}</div>`;
+}
 function vResumen(){
   const alerts=buildAlerts();
   const months=monthsBack(6), cur=months[5], prev=months[4];
@@ -719,28 +758,28 @@ function vResumen(){
   const mesNombre=`${["enero","febrero","marzo","abril","mayo","junio","julio","agosto","setiembre","octubre","noviembre","diciembre"][+cur.slice(5,7)-1]} ${cur.slice(0,4)}`;
   const kpis=prods.map(p=>{ const c=G.byM[cur]?.[p]||0, pv=G.byM[prev]?.[p]||0; const d=pv?Math.round((c-pv)/pv*100):null;
     return `<div class="card kpi"><div class="lab"><span>${esc(p)}</span><i class="dot" style="background:${pcol(p)}"></i></div><div class="big">${qty(Math.round(c))} <span style="font-size:14px;color:var(--muted)">${isGlp(p)?"kg":"gal"}</span></div><div class="foot"><span class="delta" style="color:${pcol(p)}">${d===null?(c?"Nuevo este mes":"Sin compras este mes"):(d>=0?"▲ ":"▼ ")+Math.abs(d)+"% vs. "+mLabel(prev).toLowerCase()}</span>${svgSpark(months.map(m=>G.byM[m]?.[p]||0),pcol(p))}</div></div>`; }).join("");
+  const vMes=S.ventas.filter(v=>v.estado!=="Anulada"&&String(v.fecha).slice(0,7)===cur), vGal=vMes.reduce((a,v)=>a+num(v.galones),0), vGan=vMes.reduce((a,v)=>a+ventaGanancia(v),0);
+  const kVentas=S.ventas.length?`<a class="card kpi" href="#ventas" style="text-decoration:none;color:inherit"><div class="lab"><span>Ventas GLP del mes</span><i class="dot" style="background:#3EC5FF"></i></div><div class="big">${qty(Math.round(vGal))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="foot"><span class="delta" style="color:${vGan<0?"var(--bad)":"var(--ok)"}">Ganancia ${money(vGan)}</span>${svgSpark(months.map(m=>S.ventas.filter(v=>v.estado!=="Anulada"&&String(v.fecha).slice(0,7)===m).reduce((a,v)=>a+num(v.galones),0)),"#3EC5FF")}</div></a>`:"";
   const kMonto=`<div class="card kpi"><div class="lab"><span>Facturado del mes</span><i class="dot" style="background:var(--ok)"></i></div><div class="big">${money(G.monto[cur]||0)}</div><div class="foot"><span class="delta" style="color:var(--ok)">${S.facturas.filter(f=>String(docFecha(f)).slice(0,7)===cur).length} factura(s) · incluye percepción</span>${svgSpark(months.map(m=>G.monto[m]||0),"#4ADE80")}</div></div>`;
   const totProd=prods.map(p=>({label:p,val:months.reduce((a,m)=>a+(G.byMgal[m]?.[p]||0),0),col:pcol(p)})).filter(x=>x.val>0);
   const totGal=totProd.reduce((a,x)=>a+x.val,0);
   const gauges=S.proveedores.map(p=>{ const s=saldoProveedor(p.id); const cs=S.compras.filter(c=>c.proveedorId===p.id&&c.estado!=="Anulada"&&facturasCompra(c.id).length); const avg=cs.length?cs.reduce((a,c)=>a+facturasCompra(c.id).reduce((x,f)=>x+facTotal(f),0),0)/cs.length:0;
     const pct=avg?Math.abs(s.saldo)/avg*100:(s.saldo?100:0); const col=s.saldo>=0?"#4ADE80":"#FF7A93";
     return `<div class="card gauge" style="flex:1 1 300px">${svgGauge(pct,col,`${p.nombre}: ${s.saldo>=0?"saldo a favor":"por pagar"} ${money(Math.abs(s.saldo))}`)}<div style="min-width:0"><div style="font-weight:600">${esc(p.nombre)} ${tipoTag(p.tipo)}</div><div class="small muted">${Math.abs(s.saldo)<0.01?"Al día":s.saldo>0?"Saldo a favor":"Por pagar"} · ${avg?`${Math.round(pct)}% de una compra facturada promedio`:"sin facturas aún"}</div><div class="big" style="font-size:22px;color:${col}">${money(Math.abs(s.saldo))}</div><div class="row" style="margin-top:6px"><a class="btn sm" href="#nueva" data-prov="${p.id}">Comprar</a><button class="btn sm" data-dep="${p.id}">Depósito</button></div></div></div>`; }).join("");
-  const kp=knownProducts(); if(!RES.prod || !kp.includes(RES.prod)) RES.prod = kp.find(x=>/diesel/.test(norm(x))) || kp[0] || "";
-  const series=RES.prod?priceSeries(RES.prod):[]; const lineSvg=svgLines(series);
+
   const scopRows=[...S.compras].filter(c=>c.estado!=="Anulada").sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha))).slice(0,5);
   const ult=[...S.compras].sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha))).slice(0,6);
   return `<div class="head"><div><h2>Panel de compras</h2><p>${mesNombre[0].toUpperCase()+mesNombre.slice(1)} · saldo por proveedor = saldo inicial + depósitos − facturas (con percepción).</p></div>
     <div class="row"><button class="btn" id="rVoucher">${ic("cam")}Subir voucher</button><a class="btn" href="#comparar">${ic("scale")}Comparar precios</a><a class="btn pri" href="#nueva">${ic("plus","currentColor",18,2.5)}Nueva compra</a></div></div>
     ${!S.proveedores.length?`<div class="card"><h3>Empieza aquí</h3><p class="muted">Registra los datos de tu empresa y tu cisterna, y luego tus proveedores de combustibles líquidos y GLP con sus cuentas y precios. Los gráficos se llenan solos con cada compra.</p><div class="row"><a class="btn pri" href="#empresa">Mi empresa</a><a class="btn" href="#proveedores">Agregar proveedor</a></div></div>`:""}
-    <div class="grid g4">${kpis}${kMonto}</div>
+    <div class="grid g4">${kpis}${kMonto}${kVentas}</div>
     <div class="flex">
       <section class="card grow"><div class="row between"><h3>Volumen comprado por mes (galones)</h3>${legendHtml(prods.map(p=>[pcol(p),p]))}</div>${hayCompras?svgBars(months,prods,G.byMgal)+`<div class="small muted">GLP convertido a galones con el factor ${glpF()} kg/gal.</div>`:'<div class="empty">El gráfico aparece cuando registres tu primera compra.</div>'}</section>
       <section class="card side-col" style="align-items:center"><h3 style="align-self:flex-start">Mezcla de los últimos 6 meses</h3>${totGal?svgDonut(totProd,kfmt(totGal),"galones"):'<div class="empty">Sin datos todavía.</div>'}${totGal?legendHtml(totProd.map(x=>[x.col,`${x.label} ${Math.round(x.val/totGal*100)}%`])):""}</section>
     </div>
     ${gauges?`<div class="flex">${gauges}</div>`:""}
     <div class="flex">
-      <section class="card grow"><div class="row between"><h3>Precio referencial por proveedor</h3>${kp.length?`<select id="rProdSel" style="width:auto" aria-label="Producto">${kp.map(x=>`<option ${x===RES.prod?"selected":""}>${esc(x)}</option>`).join("")}</select>`:""}</div>
-        ${lineSvg?legendHtml(series.map(s=>[s.col,s.name]))+lineSvg:'<div class="empty">Se llena cada vez que actualizas los precios de tus proveedores.</div>'}</section>
+      <section class="card grow"><div class="row between"><h3>Precios de hoy por producto</h3><a class="small" href="#comparar">Comparar una carga completa</a></div>${preciosHoyHtml()}</section>
       <section class="card side-col"><h3>SCOP de las últimas cargas</h3>${scopRows.length?scopRows.map(c=>`<div data-compra="${c.id}" style="cursor:pointer;border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:4px"><div class="row between"><span class="small muted">${fdate(c.fecha)} · ${esc(provName(c.proveedorId))}${placaOf(c)?" · "+esc(placaOf(c)):""}</span>${scopPill(c)}</div><div class="small">${scopsOf(c).map(s=>`<span style="white-space:nowrap;margin-right:10px"><i class="sw" style="background:${pcol(s.producto)}"></i> ${esc(shortProd(s.producto))} <span class="mono">${esc(s.codigo||"—")}</span></span>`).join("")}</div></div>`).join(""):'<div class="empty">Sin cargas registradas.</div>'}</section>
     </div>
     <section class="card"><div class="row between"><h3>Pendientes</h3><span class="small muted">${alerts.length} aviso(s)</span></div><div class="alerts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">${alerts.length?alerts.map(a=>`<div class="alert ${a.lvl}"><div style="flex:1">${a.t}</div><a class="small" href="${a.go}">Ver</a></div>`).join(""):'<div class="alert ok">Todo en orden.</div>'}</div></section>
@@ -921,12 +960,12 @@ function cotCalc(){
   const lines = src.map(l=>({...l, importe:r2(num(l.cantidad)*num(l.precio))}));
   const total = r2(lines.reduce((a,l)=>a+l.importe,0));
   const pct = num(p?.percepcionPct);
-  const percepcion = r2(total*pct/100);
+  const pc = percCot(lines,pct), percepcion = pc.add;
   const sp = p ? saldoProveedor(p.id).saldo : 0;
   const saldo = Math.max(0, sp), deuda = Math.max(0, -sp);
   const aplicar = Math.min(saldo, total+percepcion);
   const depositar = r2(total + percepcion - aplicar + deuda);
-  return {p, tipo, lines, total, pct, percepcion, saldo, deuda, aplicar, depositar, base:r2(total/1.18), igv:r2(total-total/1.18)};
+  return {p, tipo, lines, total, pct, percepcion, percIncl:pc.incl, saldo, deuda, aplicar, depositar};
 }
 function vNueva(){
   if(!S.proveedores.length) return `<div class="head"><div><h2>Nueva compra</h2></div></div><div class="card"><p>Primero registra al menos un proveedor con sus productos y precios.</p><a class="btn pri" href="#proveedores">Agregar proveedor</a></div>`;
@@ -951,10 +990,10 @@ function vNueva(){
       ${hayU?"":`<a class="small" href="#unidades">Registra una unidad de ${tipo==="glp"?"GLP":"líquidos"} para usar el plan de carga</a>`}
     </div>
     ${conU?tankEditor(tipo)+`
-      <div class="tablewrap"><table><thead><tr><th>Producto</th><th class="n">Cantidad</th><th class="n">Sin imp.</th><th class="n">Con IGV</th><th class="n">IGV + perc.</th><th class="n">Importe</th></tr></thead><tbody>
-      ${c2.lines.map(l=>`<tr><td><i class="sw" style="background:${pcol(l.producto)}"></i> ${esc(l.producto)}${l.falta?' <span class="pill p-bad">sin precio</span>':""}</td><td class="n">${qty(l.cantidad)} ${esc(l.unidad)}</td><td class="n">${money(precioSinImp(l.precio))}</td><td class="n">${money(l.precio)}</td><td class="n">${money(precioConPer(l.precio,c2.pct))}</td><td class="n">${money(l.importe)}</td></tr>`).join("")||'<tr><td colspan="6" class="empty">Indica la carga de la unidad.</td></tr>'}
+      <div class="tablewrap"><table><thead><tr><th>Producto</th><th class="n">Cantidad</th><th class="n">Precio con impuestos</th><th class="n">Importe</th></tr></thead><tbody>
+      ${c2.lines.map(l=>`<tr><td><i class="sw" style="background:${pcol(l.producto)}"></i> ${esc(l.producto)}${l.falta?' <span class="pill p-bad">sin precio</span>':""}</td><td class="n">${qty(l.cantidad)} ${esc(l.unidad)}</td><td class="n">${money4(l.precio)}/${esc(l.unidad)}${isGlp(l.producto)&&l.precio?`<div class="small muted">sin impuestos ${money4(glpSinImp(l.precio,c2.pct))}</div>`:""}</td><td class="n">${money(l.importe)}</td></tr>`).join("")||'<tr><td colspan="4" class="empty">Indica la carga de la unidad.</td></tr>'}
       </tbody></table></div>`
-    :`<div class="tablewrap"><table class="lines"><thead><tr><th>Producto</th><th class="n">Cantidad</th><th class="n">Precio ref. (inc. IGV)</th><th class="n">Importe</th><th></th></tr></thead><tbody>
+    :`<div class="tablewrap"><table class="lines"><thead><tr><th>Producto</th><th class="n">Cantidad</th><th class="n">Precio con impuestos</th><th class="n">Importe</th><th></th></tr></thead><tbody>
       ${c2.lines.map((l,i)=>`<tr>
         <td><select data-l="${i}" data-k="producto" aria-label="Producto">${(p.productos||[]).map(pr=>`<option ${pr.nombre===l.producto?"selected":""}>${esc(pr.nombre)}</option>`).join("")}</select></td>
         <td class="n"><div class="row" style="flex-wrap:nowrap;gap:4px"><input type="number" min="0" step="any" data-l="${i}" data-k="cantidad" value="${esc(l.cantidad)}" placeholder="0" style="width:110px" aria-label="Cantidad"><span class="small muted">${esc(l.unidad||"gal")}</span></div></td>
@@ -968,9 +1007,9 @@ function vNueva(){
    </div>
    <div class="card side-col">
     <h3>Monto aproximado</h3>
-    <dl class="kv"><dt>Valor venta (sin IGV)</dt><dd class="num">${money(c2.base)}</dd><dt>IGV 18%</dt><dd class="num">${money(c2.igv)}</dd>
-      <dt>Total compra</dt><dd class="num"><b>${money(c2.total)}</b></dd>
-      <dt>Percepción ${c2.pct?`(${c2.pct}%)`:""}</dt><dd class="num">${money(c2.percepcion)}</dd>
+    <dl class="kv"><dt>Total compra (con impuestos)</dt><dd class="num"><b>${money(c2.total)}</b></dd>
+      ${c2.percIncl?`<dt>Percepción incluida en el precio</dt><dd class="num muted">${money(c2.percIncl)}</dd>`:""}
+      ${c2.percepcion||!c2.percIncl?`<dt>Percepción ${c2.pct?`(${c2.pct}%)`:""} a sumar</dt><dd class="num">${money(c2.percepcion)}</dd>`:""}
       <dt>Saldo a favor aplicado</dt><dd class="num pos">− ${money(c2.aplicar)}</dd>
       ${c2.deuda?`<dt>Deuda pendiente</dt><dd class="num neg">+ ${money(c2.deuda)}</dd>`:""}
     </dl>
@@ -1013,7 +1052,7 @@ bind.nueva = v=>{
         items:c.lines.filter(l=>num(l.cantidad)>0).map(l=>({producto:l.producto, unidad:l.unidad, cantidad:num(l.cantidad), precio:num(l.precio), importe:l.importe})),
         unidadId:u?u.id:"", unidad:u?{nombre:u.nombre, placa:u.placa, placaTracto:u.placaTracto||"", propiedad:u.propiedad, transportista:u.transportista||null, conductor:u.conductor||""}:null,
         carga: u ? PLANS[c.tipo].comps.map((x,i)=>({comp:i+1, capacidad:caps[i], producto:x.prod||"", cantidad:x.prod?num(x.cant):0})) : null,
-        total:c.total, percepcionPct:c.pct, percepcion:c.percepcion, saldoAplicado:c.aplicar, montoDepositar:c.depositar,
+        total:c.total, percepcionPct:c.pct, percepcion:c.percepcion, glpPrecioConPer:true, saldoAplicado:c.aplicar, montoDepositar:c.depositar,
         estado:"Cotizada", notas:COT.notas, scops:c.lines.filter(l=>num(l.cantidad)>0).map(l=>({producto:l.producto, codigo:"", estado:"pendiente"})), scopTransportista:"", placa:u?u.placa:"", conductor:u?u.conductor||"":"", creado:new Date().toISOString()
       });
       COT.lines=[]; COT.notas="";
@@ -1028,7 +1067,7 @@ bind.nueva = v=>{
 const CMP={glp:""};
 function costoEn(p, lines){
   const ls=lines.map(l=>({...l, importe:r2(num(l.cantidad)*num(l.precio))}));
-  const total=r2(ls.reduce((a,l)=>a+l.importe,0)), percepcion=r2(total*num(p.percepcionPct)/100);
+  const total=r2(ls.reduce((a,l)=>a+l.importe,0)), percepcion=percCot(ls,p.percepcionPct).add;
   const sp=saldoProveedor(p.id).saldo, aplicar=Math.min(Math.max(0,sp), total+percepcion), deuda=Math.max(0,-sp);
   return {p, lines:ls, total, percepcion, sp, aplicar, deuda, depositar:r2(total+percepcion-aplicar+deuda), falta:ls.filter(l=>l.falta).map(l=>l.producto)};
 }
@@ -1040,10 +1079,10 @@ function rankHtml(opts, kind, tipo){
   return `${best&&ok.length>1?`<div class="alert ok"><div>Comprando a <b>${esc(best.p.nombre)}</b> ahorras <b class="mono">${money(ahorro)}</b> frente a la opción más cara.</div></div>`:""}
   <div class="rank">${ok.concat(bad).map(o=>{ const isBest=o===best; return `<div class="opt ${isBest?"best":""}">
     <div class="nm"><div class="row" style="gap:8px"><b>${esc(o.p.nombre)}</b>${isBest?`<span class="pill p-ok">${ok.length>1?"Mejor precio":"Única opción con precio"}</span>`:""}${o.falta.length?`<span class="pill p-bad">Sin precio: ${o.falta.map(esc).join(", ")}</span>`:""}</div>
-      <div class="small muted">${o.lines.map(l=>`${shortProd(l.producto)} ${num(l.precio)?`${money(l.precio)}/${l.unidad} (s/imp. ${money(precioSinImp(l.precio))})`:"—"}`).join(" · ")}${o.sp>0?` · saldo a favor ${money(o.sp)}`:o.sp<0?` · debes ${money(-o.sp)}`:""}</div>
+      <div class="small muted">${o.lines.map(l=>`${shortProd(l.producto)} ${num(l.precio)?`${money4(l.precio)}/${l.unidad}`:"—"}`).join(" · ")}${o.sp>0?` · saldo a favor ${money(o.sp)}`:o.sp<0?` · debes ${money(-o.sp)}`:""}</div>
       ${o.total&&!o.falta.length?`<div class="track"><i style="width:${(o.total/max*100).toFixed(1)}%;background:${isBest?"var(--ok)":"var(--accent)"}"></i></div>`:""}</div>
     <div class="amt"><div class="small muted">Total compra</div><div class="mono" style="font-size:19px;font-weight:700">${o.falta.length?"—":money(o.total)}</div>${!isBest&&best&&!o.falta.length?`<div class="small p-bad">+ ${money(o.total-best.total)}</div>`:""}</div>
-    <div class="amt"><div class="small muted">A depositar</div><div class="mono" style="font-size:15px">${o.falta.length?"—":money(o.depositar)}</div><div class="small muted">incl. percepción ${money(o.percepcion)}</div></div>
+    <div class="amt"><div class="small muted">A depositar</div><div class="mono" style="font-size:15px">${o.falta.length?"—":money(o.depositar)}</div><div class="small muted">${o.percepcion?`+ percepción ${money(o.percepcion)}`:"percepción incluida"}</div></div>
     <button class="btn sm ${isBest?"pri":""}" data-buy="${o.p.id}" data-buytipo="${tipo}" ${o.falta.length?"disabled":""}>Comprar aquí</button>
   </div>`; }).join("")}</div>`;
 }
@@ -1053,7 +1092,7 @@ function vComparar(){
   const matrix = prods.length&&provs.length ? `<div class="tablewrap"><table><thead><tr><th>Producto</th>${provs.map(p=>`<th class="n">${esc(p.nombre)}</th>`).join("")}<th class="n">Diferencia</th></tr></thead><tbody>
     ${prods.map(prod=>{ const cells=provs.map(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); const u=isGlp(prod)?"kg":"gal"; const v=x?precioEn(x,u):0; return x&&v>0?{v,d:x.actualizado,pct:num(p.percepcionPct)}:null; });
       const vals=cells.filter(Boolean).map(c=>c.v), mn=Math.min(...vals), mx=Math.max(...vals);
-      return `<tr><td><i class="sw" style="background:${pcol(prod)}"></i> ${esc(prod)} <span class="small muted">/${isGlp(prod)?"kg":"gal"}</span></td>${cells.map(c=>{ if(!c) return '<td class="n muted">—</td>'; const old=!c.d||daysBetween(c.d,today())>7; return `<td class="n"><span class="${vals.length>1&&c.v===mn?"cheap":""}">${money(c.v)}</span><div class="small muted">s/imp. ${money(precioSinImp(c.v))} · c/perc. ${money(precioConPer(c.v,c.pct))}</div>${vals.length>1&&c.v>mn?`<div class="small p-bad">+${(c.v-mn).toFixed(2)}</div>`:""}<div class="small ${old?"p-warn":"muted"}">${c.d?fdate(c.d):"sin fecha"}${old?" · revisar":""}</div></td>`; }).join("")}<td class="n">${vals.length>1?`<b class="mono">${(mx-mn).toFixed(2)}</b><div class="small muted">por galón</div>`:'<span class="muted">—</span>'}</td></tr>`; }).join("")}
+      return `<tr><td><i class="sw" style="background:${pcol(prod)}"></i> ${esc(prod)} <span class="small muted">/${isGlp(prod)?"kg":"gal"}</span></td>${cells.map(c=>{ if(!c) return '<td class="n muted">—</td>'; const old=!c.d||daysBetween(c.d,today())>7; return `<td class="n"><span class="${vals.length>1&&c.v===mn?"cheap":""}">${money4(c.v)}</span>${isGlp(prod)?`<div class="small muted">sin impuestos ${money4(glpSinImp(c.v,c.pct))}</div>`:""}${vals.length>1&&c.v>mn?`<div class="small p-bad">+${(c.v-mn).toFixed(4)}</div>`:""}<div class="small ${old?"p-warn":"muted"}">${c.d?fdate(c.d):"sin fecha"}${old?" · revisar":""}</div></td>`; }).join("")}<td class="n">${vals.length>1?`<b class="mono">${(mx-mn).toFixed(4)}</b><div class="small muted">por ${isGlp(prod)?"kg":"galón"}</div>`:'<span class="muted">—</span>'}</td></tr>`; }).join("")}
     </tbody></table></div>` : '<div class="empty">Registra proveedores con precios para comparar.</div>';
   const hayUL=unidadesDe("liquidos").length>0, hayUG=unidadesDe("glp").length>0;
   if(hayUL) syncPlan("liquidos"); if(hayUG) syncPlan("glp");
@@ -1061,7 +1100,7 @@ function vComparar(){
   const glpLinesFree=p=>{ const pr=findProd(p,"GLP granel"), v=precioEn(pr,"kg"); return [{producto:pr?.nombre||"GLP granel", unidad:"kg", cantidad:num(CMP.glp), precio:v, falta:!pr||!v}]; };
   const glpOpts=hayUG?glp.map(p=>costoEn(p, planLinesFor(p,"glp"))):(num(CMP.glp)>0?glp.map(p=>costoEn(p, glpLinesFree(p))):[]);
   return `<div class="head"><div><h2>Comparar precios</h2><p>Antes de comprar: precios referenciales de cada proveedor y cuánto te costaría la misma carga con cada uno. Actualiza los precios del día para que la comparación sea real.</p></div><a class="btn" href="#proveedores">Actualizar precios</a></div>
-  <section class="card"><h3>Precios vigentes (con IGV) · líquidos por galón, GLP por kilogramo</h3>${matrix}<div class="small muted">En verde el más barato de cada producto. Debajo de cada precio: sin impuestos y con IGV + percepción. "Revisar" indica precios con más de 7 días.</div></section>
+  <section class="card"><h3>Precios vigentes con impuestos · líquidos por galón, GLP por kilogramo</h3>${matrix}<div class="small muted">En verde el más barato de cada producto. En GLP se muestra también el precio sin impuestos. "Revisar" indica precios con más de 7 días.</div></section>
   <section class="card"><div class="row between"><h3>Combustibles líquidos: ¿dónde conviene la carga?</h3><span class="small muted">Edita la carga y la comparación se actualiza</span></div>
     ${hayUL?`<div class="fields">${unitSelect("liquidos","cmpUL")}</div>${tankEditor("liquidos")}${rankHtml(liqOpts,"combustibles líquidos","liquidos")}`:tankEditor("liquidos")}
   </section>
@@ -1069,7 +1108,7 @@ function vComparar(){
     ${hayUG?`<div class="fields">${unitSelect("glp","cmpUG")}</div>${tankEditor("glp")}${rankHtml(glpOpts,"GLP","glp")}`
     :`<div class="row"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Kilogramos de GLP a comprar<input type="number" min="0" id="cmpGlp" value="${esc(CMP.glp)}" placeholder="0" style="width:120px"></label><a class="small" href="#unidades">o registra tu unidad de GLP</a></div>${num(CMP.glp)>0?rankHtml(glpOpts,"GLP","glp"):'<div class="empty">Escribe cuántos kilogramos de GLP piensas comprar.</div>'}`}
   </section>
-  <div class="small muted">El total compara precio × galones. La percepción se muestra aparte porque luego la recuperas como crédito del IGV; el monto a depositar ya descuenta tu saldo a favor con cada proveedor.</div>`;
+  <div class="small muted">El total compara precio con impuestos × cantidad. En líquidos la percepción del proveedor se suma aparte al monto a depositar; en GLP ya está dentro del precio. El monto a depositar descuenta tu saldo a favor con cada proveedor.</div>`;
 }
 bind.comparar = v=>{
   bindTank(v, renderKeep);
@@ -1205,7 +1244,16 @@ let ocrWorker=null;
 async function ocr(blob){
   if(!window.Tesseract) await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
   if(!ocrWorker) ocrWorker = await Tesseract.createWorker("spa");
-  const {data} = await ocrWorker.recognize(blob);
+  let src=blob;
+  try{ /* mejora la imagen para leerla mejor: escala de grises, más contraste y tamaño suficiente */
+    const bmp=await createImageBitmap(blob); const k=Math.min(2.5,Math.max(1,1800/Math.max(bmp.width,bmp.height)));
+    const cv=document.createElement("canvas"); cv.width=Math.round(bmp.width*k); cv.height=Math.round(bmp.height*k);
+    const cx=cv.getContext("2d"); cx.drawImage(bmp,0,0,cv.width,cv.height);
+    const im=cx.getImageData(0,0,cv.width,cv.height), d=im.data;
+    for(let i=0;i<d.length;i+=4){ const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; const c=Math.max(0,Math.min(255,(g-128)*1.45+128)); d[i]=d[i+1]=d[i+2]=c; }
+    cx.putImageData(im,0,0); src=await new Promise(r=>cv.toBlob(r,"image/png"));
+  }catch(_){ src=blob; }
+  const {data} = await ocrWorker.recognize(src||blob);
   return data.text||"";
 }
 function parseAmount(s){ s=String(s||"").replace(/\s/g,""); if(!s) return 0;
@@ -1301,8 +1349,8 @@ function modalDeposito(d0){
   const comprasDe = pid => S.compras.filter(c=>c.proveedorId===pid && c.estado!=="Anulada");
   openModal(`<div class="row between"><h2>${selfId?"Editar":"Registrar"} depósito</h2></div>
    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Subir voucher">
-     <b>Toma una foto o sube el voucher</b><span class="small muted">JPG, PNG o PDF. En el celular puedes usar la cámara.</span>
-     <input type="file" id="file" accept="image/*,application/pdf" hidden>
+     <b>Foto o archivo del voucher</b><span class="small muted">En el celular, "Tomar foto" abre la cámara. Encuadra el voucher completo, sin sombras y con buena luz.</span>
+     <div class="row" style="justify-content:center"><button type="button" class="btn pri" data-cam>${ic("cam","currentColor",17)}Tomar foto</button><button type="button" class="btn" data-pick>Elegir archivo o PDF</button></div><input type="file" id="file" accept="image/*,application/pdf" hidden><input type="file" id="cam" accept="image/*" capture="environment" hidden>
      <div id="prev"></div><div id="aiState" class="small"></div>
    </div>
    <form id="fd"><div class="fields">
@@ -1326,7 +1374,9 @@ function modalDeposito(d0){
     $("#fd",m).addEventListener("input",paintChecks); $("#fd",m).addEventListener("change",paintChecks);
     if(selfId && d.assetId) $("#prev",m).innerHTML=fileLink(d.assetId,"Ver voucher guardado");
     const drop=$("#drop",m), inp=$("#file",m);
-    drop.addEventListener("click",e=>{ if(!e.target.closest("[data-file]")) inp.click(); });
+    const cam=$("#cam",m);
+    drop.addEventListener("click",e=>{ if(e.target.closest("[data-file]")) return; if(e.target.closest("[data-cam]")){ cam.click(); return; } inp.click(); });
+    cam.addEventListener("change",()=>{ if(cam.files[0]) handle(cam.files[0]); });
     drop.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); inp.click(); } });
     drop.addEventListener("dragover",e=>{e.preventDefault(); drop.classList.add("over");});
     drop.addEventListener("dragleave",()=>drop.classList.remove("over"));
@@ -1394,13 +1444,13 @@ bind.facturas = v=>{
   $$("[data-edit]",v).forEach(b=>b.addEventListener("click",()=>modalFactura(S.facturas.find(f=>f.id===b.dataset.edit))));
 };
 function itemDe(c,prod){ return c ? (c.items||[]).find(i=>i.producto===prod) : null; }
-function esperadoFactura(c,prod){ const it=itemDe(c,prod); return it ? r2(num(it.importe)*(1+num(c.percepcionPct)/100)) : 0; }
+function esperadoFactura(c,prod){ const it=itemDe(c,prod); if(!it) return 0; return isGlp(prod)&&c.glpPrecioConPer ? r2(num(it.importe)) : r2(num(it.importe)*(1+num(c.percepcionPct)/100)); }
 function modalFactura(f0){
   const f={proveedorId:"", compraId:"", producto:"", serie:"", numero:"", fecha:today(), galones:"", percepcion:"", total:"", ...f0};
   if(f0 && f0.id && !f0.incluyePercepcion) f.total=facTotal(f0);
   const selfId=f0&&f0.id; let file=null, ai=null;
   openModal(`<h2>${selfId?"Editar":"Registrar"} factura</h2>
-   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Subir factura"><b>Sube la factura (PDF o foto)</b><span class="small muted">Se leen RUC, serie, número, producto, galones, percepción y total.</span><input type="file" id="file" accept="image/*,application/pdf" hidden><div id="prev"></div><div id="aiState" class="small"></div></div>
+   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Subir factura"><b>Foto o PDF de la factura</b><span class="small muted">Se leen RUC, serie, número, producto, cantidad, percepción y total. En el celular, "Tomar foto" abre la cámara.</span><div class="row" style="justify-content:center"><button type="button" class="btn pri" data-cam>${ic("cam","currentColor",17)}Tomar foto</button><button type="button" class="btn" data-pick>Elegir archivo o PDF</button></div><input type="file" id="file" accept="image/*,application/pdf" hidden><input type="file" id="cam" accept="image/*" capture="environment" hidden><div id="prev"></div><div id="aiState" class="small"></div></div>
    <form id="ff"><div class="fields fac-grid">
     <label class="f">Proveedor<select id="fProv2"><option value="">— Selecciona —</option>${S.proveedores.map(p=>`<option value="${p.id}" ${p.id===f.proveedorId?"selected":""}>${esc(p.nombre)}</option>`).join("")}</select></label>
     <label class="f">Compra vinculada<select id="fComp"></select></label>
@@ -1445,7 +1495,9 @@ function modalFactura(f0){
     $("#ff",m).addEventListener("input",check); $("#ff",m).addEventListener("change",check);
     if(selfId && f.assetId) $("#prev",m).innerHTML=fileLink(f.assetId,"Ver archivo guardado");
     const drop=$("#drop",m), inp=$("#file",m);
-    drop.addEventListener("click",e=>{ if(!e.target.closest("[data-file]")) inp.click(); });
+    const cam=$("#cam",m);
+    drop.addEventListener("click",e=>{ if(e.target.closest("[data-file]")) return; if(e.target.closest("[data-cam]")){ cam.click(); return; } inp.click(); });
+    cam.addEventListener("change",()=>{ if(cam.files[0]) handle(cam.files[0]); });
     drop.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); inp.click(); } });
     drop.addEventListener("dragover",e=>{e.preventDefault(); drop.classList.add("over");});
     drop.addEventListener("dragleave",()=>drop.classList.remove("over"));
@@ -1533,7 +1585,7 @@ function vProveedores(){
     <div class="row between"><h3>${esc(p.nombre)}</h3>${tipoTag(p.tipo)}</div>
     <dl class="kv small"><dt>RUC</dt><dd class="mono">${esc(p.ruc||"—")}</dd><dt>Contacto</dt><dd>${esc([p.contacto,p.telefono].filter(Boolean).join(" · ")||"—")}</dd><dt>Percepción</dt><dd>${num(p.percepcionPct)}%</dd><dt>Saldo</dt><dd class="num ${s.saldo>=0?"pos":"neg"}">${s.saldo>=0?"A favor ":"Por pagar "}${money(Math.abs(s.saldo))}</dd></dl>
     <div class="tablewrap"><table><thead><tr><th>Producto</th><th class="n">Precio ref.</th><th>Actualizado</th></tr></thead><tbody>
-     ${(p.productos||[]).map(pr=>{ const old=!pr.actualizado||daysBetween(pr.actualizado,today())>7; return `<tr><td>${esc(pr.nombre)} <span class="small muted">/${esc(pr.unidad||"gal")}</span></td><td class="n">${num(pr.precio)?money(pr.precio):'<span class="p-bad">sin precio</span>'}</td><td class="small ${old?"p-warn":""}">${fdate(pr.actualizado)}</td></tr>`;}).join("")||'<tr><td colspan="3" class="empty">Sin productos</td></tr>'}
+     ${(p.productos||[]).map(pr=>{ const old=!pr.actualizado||daysBetween(pr.actualizado,today())>7; return `<tr><td>${esc(pr.nombre)} <span class="small muted">/${esc(pr.unidad||"gal")}</span></td><td class="n">${num(pr.precio)?money4(pr.precio):'<span class="p-bad">sin precio</span>'}</td><td class="small ${old?"p-warn":""}">${fdate(pr.actualizado)}</td></tr>`;}).join("")||'<tr><td colspan="3" class="empty">Sin productos</td></tr>'}
     </tbody></table></div>
     <div class="small">${(p.cuentas||[]).map(c=>`<div>${esc(c.banco)} · ${esc(c.moneda||"PEN")} · <span class="mono">${esc(c.numero)}</span></div>`).join("")||'<span class="muted">Sin cuentas bancarias</span>'}</div>
     <div class="row"><button class="btn sm pri" data-precio="${p.id}">Actualizar precios</button><button class="btn sm" data-editp="${p.id}">Editar datos</button></div>
@@ -1597,37 +1649,35 @@ function modalProveedor(p0){
 }
 function modalPrecios(pid){
   const p=prov(pid); if(!p) return;
-  let prods=(p.productos||[]).map(x=>({...x}));
-  const pct=num(p.percepcionPct); let modo=p.tipo==="glp"?"per":"igv";
-  openModal(`<h2>Precios referenciales · ${esc(p.nombre)}</h2><p class="small muted">Solo sirven para cotizar y comparar antes de comprar; no entran en los reportes. El GLP se cotiza por kilogramo. Al guardar, los precios cambiados quedan con la fecha de hoy.</p>
-   <div class="row"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Escribo el nuevo precio<select id="prModo" style="width:auto"><option value="sin">sin impuestos</option><option value="igv">con IGV 18%</option><option value="per">con IGV 18% + percepción ${pct}%</option></select></label></div>
-   <div class="tablewrap"><table class="lines"><thead><tr><th>Producto</th><th>Unidad</th><th class="n">Sin impuestos</th><th class="n">Con IGV</th><th class="n">Con IGV + percepción</th><th class="n">Nuevo precio</th><th></th></tr></thead><tbody id="pb"></tbody></table></div>
+  let prods=(p.productos||[]).map(x=>({...x, modo:"con"}));
+  const pct=num(p.percepcionPct);
+  openModal(`<h2>Precios referenciales · ${esc(p.nombre)}</h2><p class="small muted">Solo sirven para cotizar y comparar antes de comprar; no entran en los reportes. Se guardan <b>con impuestos</b> y con 4 decimales. Combustibles líquidos: el precio que da el proveedor (ya incluye sus impuestos). GLP: por kilogramo; puedes escribirlo con impuestos (IGV 18% + percepción ${pct}%) o sin impuestos y la app lo convierte.</p>
+   <div class="tablewrap"><table class="lines"><thead><tr><th>Producto</th><th>Unidad</th><th class="n">Precio actual</th><th>Escribo el precio</th><th class="n">Nuevo precio</th><th></th></tr></thead><tbody id="pb"></tbody></table></div>
    <button class="btn sm" id="addPr">+ Agregar producto</button>
-   ${(p.historial||[]).length?`<details><summary class="small">Historial de precios (${p.historial.length})</summary><div class="small">${[...p.historial].reverse().slice(0,30).map(h=>`<div>${fdate(h.fecha)} · ${esc(h.producto)}: ${money(h.anterior)} → <b>${money(h.precio)}</b></div>`).join("")}</div></details>`:""}
+   ${(p.historial||[]).length?`<details><summary class="small">Historial de precios (${p.historial.length})</summary><div class="small">${[...p.historial].reverse().slice(0,30).map(h=>`<div>${fdate(h.fecha)} · ${esc(h.producto)}: ${money4(h.anterior)} → <b>${money4(h.precio)}</b></div>`).join("")}</div></details>`:""}
    <div class="row between"><span></span><div class="row"><button class="btn" data-close>Cancelar</button><button class="btn pri" id="prSave">Guardar precios</button></div></div>`,
   m=>{
-    const paint=()=>{ $("#pb",m).innerHTML=prods.map((x,i)=>`<tr>
+    const conImp=x=>{ const v=num(x.nuevo); return isGlp(x.nombre)&&x.modo==="sin" ? glpConImp(v,pct) : v; };
+    const paint=()=>{ $("#pb",m).innerHTML=prods.map((x,i)=>{ const g=isGlp(x.nombre); return `<tr>
       <td><input data-i="${i}" data-k="nombre" value="${esc(x.nombre)}" aria-label="Producto"></td>
       <td><select data-i="${i}" data-k="unidad" aria-label="Unidad">${["gal","kg","L"].map(u=>`<option ${unitOf(x.nombre,x.unidad)===u?"selected":""}>${u}</option>`).join("")}</select></td>
-      <td class="n num">${num(x.precio)?money(precioSinImp(x.precio)):"—"}</td>
-      <td class="n num">${num(x.precio)?money(x.precio):"—"}<div class="small muted">${fdate(x.actualizado)}</div></td>
-      <td class="n num">${num(x.precio)?money(precioConPer(x.precio,pct)):"—"}</td>
-      <td class="n"><input type="number" step="0.0001" min="0" data-i="${i}" data-k="nuevo" value="${esc(x.nuevo??"")}" style="width:110px" aria-label="Nuevo precio"><div class="small muted" data-prev="${i}"></div></td>
-      <td><button class="btn sm ghost danger" data-rp="${i}" aria-label="Quitar producto">✕</button></td></tr>`).join("");
+      <td class="n num">${num(x.precio)?money4(x.precio):"—"}${g&&num(x.precio)?`<div class="small muted">sin imp. ${money4(glpSinImp(x.precio,pct))}</div>`:""}<div class="small muted">${fdate(x.actualizado)}</div></td>
+      <td>${g?`<select data-i="${i}" data-k="modo" aria-label="Tipo de precio"><option value="con" ${x.modo!=="sin"?"selected":""}>Con impuestos</option><option value="sin" ${x.modo==="sin"?"selected":""}>Sin impuestos</option></select>`:'<span class="small muted">Con impuestos</span>'}</td>
+      <td class="n"><input type="number" step="0.0001" min="0" data-i="${i}" data-k="nuevo" value="${esc(x.nuevo??"")}" placeholder="0.0000" style="width:120px" aria-label="Nuevo precio"><div class="small muted" data-prev="${i}"></div></td>
+      <td><button class="btn sm ghost danger" data-rp="${i}" aria-label="Quitar producto">✕</button></td></tr>`; }).join("");
       $$("[data-i]",m).forEach(el=>el.addEventListener("input",()=>{prods[+el.dataset.i][el.dataset.k]=el.value; prevs();}));
-      $$("[data-i]",m).forEach(el=>el.addEventListener("change",()=>{prods[+el.dataset.i][el.dataset.k]=el.value;}));
+      $$("[data-i]",m).forEach(el=>el.addEventListener("change",()=>{prods[+el.dataset.i][el.dataset.k]=el.value; if(el.dataset.k==="nombre"||el.dataset.k==="modo"){ paint(); }}));
       $$("[data-rp]",m).forEach(b=>b.addEventListener("click",()=>{prods.splice(+b.dataset.rp,1); paint();}));
+      prevs();
     };
-    const aIgv=v=> modo==="sin"? v*1.18 : modo==="per"? v/(1+pct/100) : v;
-    const prevs=()=>$$("[data-prev]",m).forEach(el=>{ const x=prods[+el.dataset.prev]; el.textContent = x.nuevo!==undefined&&x.nuevo!=="" ? `Con IGV: ${money(aIgv(num(x.nuevo)))}` : ""; });
-    $("#prModo",m).value=modo; $("#prModo",m).addEventListener("change",e=>{ modo=e.target.value; prevs(); });
-    paint(); prevs();
+    const prevs=()=>$$("[data-prev]",m).forEach(el=>{ const x=prods[+el.dataset.prev]; el.textContent = isGlp(x.nombre) && x.nuevo!==undefined && x.nuevo!=="" ? (x.modo==="sin" ? `Con impuestos: ${money4(conImp(x))}` : `Sin impuestos: ${money4(glpSinImp(num(x.nuevo),pct))}`) : ""; });
+    paint();
     const first=$('[data-k="nuevo"]',m); first&&first.focus();
-    $("#addPr",m).addEventListener("click",()=>{prods.push({nombre:"",unidad:"gal",precio:0,actualizado:""}); paint();});
+    $("#addPr",m).addEventListener("click",()=>{prods.push({nombre:"",unidad:"gal",precio:0,actualizado:"",modo:"con"}); paint();});
     $("#prSave",m).addEventListener("click",async e=>{
       const hist=[...(p.historial||[])]; const hoy=today();
       const out=prods.filter(x=>String(x.nombre).trim()).map(x=>{
-        const nuevo = x.nuevo!==undefined && x.nuevo!=="" ? Math.round(aIgv(num(x.nuevo))*10000)/10000 : null;
+        const nuevo = x.nuevo!==undefined && x.nuevo!=="" ? Math.round(conImp(x)*10000)/10000 : null;
         const o={nombre:String(x.nombre).trim(), unidad:unitOf(String(x.nombre),x.unidad), precio:num(x.precio), actualizado:x.actualizado||""};
         if(nuevo!==null && nuevo!==num(x.precio)){ hist.push({fecha:hoy, producto:o.nombre, anterior:num(x.precio), precio:nuevo}); o.precio=nuevo; o.actualizado=hoy; }
         else if(nuevo!==null){ o.actualizado=hoy; }
@@ -1778,6 +1828,121 @@ const XLSX_LITE=(()=>{
   return {build, table, ST, col};
 })();
 
+/* ============ Ventas de GLP (en galones) ============ */
+/* Costo por galón de GLP: promedio ponderado de lo FACTURADO en compras de GLP hasta la fecha (con impuestos),
+   convirtiendo kg a galones con el factor de Mi empresa. Si aún no hay facturas, usa lo cotizado en las compras. */
+function costoGlpGal(hasta){
+  let monto=0, gal=0, base="facturas";
+  S.facturas.filter(f=>isGlp(f.producto||"") && fechaOk(docFecha(f)) && (!hasta || docFecha(f)<=hasta)).forEach(f=>{
+    const c=f.compraId?S.compras.find(k=>k.id===f.compraId):null, it=c?itemDe(c,f.producto):null;
+    const q=num(f.galones)?num(f.galones):(it?num(it.cantidad):0), u=num(f.galones)?unitOf(f.producto,f.unidad||(it&&it.unidad)):unitOf(f.producto,it&&it.unidad);
+    const g=toGal(q,u); if(g>0){ monto+=facTotal(f); gal+=g; } });
+  if(!gal){ base="compras";
+    S.compras.filter(c=>c.estado!=="Anulada" && fechaOk(c.fecha) && (!hasta||c.fecha<=hasta)).forEach(c=>(c.items||[]).filter(i=>isGlp(i.producto)).forEach(i=>{ const g=toGal(i.cantidad,unitOf(i.producto,i.unidad)); if(g>0){ monto+=num(i.importe); gal+=g; } })); }
+  return gal ? {costo:monto/gal, base, gal} : {costo:0, base:null, gal:0};
+}
+function stockGlp(hasta){
+  const comprado=S.compras.filter(c=>c.estado!=="Anulada" && fechaOk(c.fecha) && (!hasta||c.fecha<=hasta)).reduce((a,c)=>a+(c.items||[]).filter(i=>isGlp(i.producto)).reduce((x,i)=>{ const f=facturaDe(c.id,i.producto); const q=f&&num(f.galones)?toGal(f.galones,unitOf(i.producto,f.unidad||i.unidad)):toGal(i.cantidad,unitOf(i.producto,i.unidad)); return x+q; },0),0);
+  const vendido=S.ventas.filter(v=>v.estado!=="Anulada" && fechaOk(v.fecha) && (!hasta||v.fecha<=hasta)).reduce((a,v)=>a+num(v.galones),0);
+  return {comprado, vendido, disponible:comprado-vendido};
+}
+const ventaTotal=v=>r2(num(v.galones)*num(v.precioGal));
+const ventaGanancia=v=>r2(num(v.galones)*(num(v.precioGal)-num(v.costoGal)));
+const scopVentaPill=v=>{ const s=v.scop||{}; return !s.codigo?'<span class="pill p-mut">Sin SCOP</span>':s.estado==="cerrado"?'<span class="pill p-ok">SCOP cerrado</span>':'<span class="pill p-warn">SCOP abierto</span>'; };
+const clientesConocidos=()=>{ const m=new Map(); S.ventas.forEach(v=>{ const c=v.cliente||{}; if(c.nombre) m.set(c.nombre,c.ruc||""); }); return [...m.entries()]; };
+const FV={mes:today().slice(0,7)};
+function vVentas(){
+  const st=stockGlp(), co=costoGlpGal(today());
+  const delMes=S.ventas.filter(v=>v.estado!=="Anulada" && String(v.fecha).slice(0,7)===FV.mes);
+  const gal=delMes.reduce((a,v)=>a+num(v.galones),0), tot=delMes.reduce((a,v)=>a+ventaTotal(v),0), gan=delMes.reduce((a,v)=>a+ventaGanancia(v),0);
+  const porCobrar=S.ventas.filter(v=>v.estado!=="Anulada"&&v.cobro!=="cobrado").reduce((a,v)=>a+ventaTotal(v),0);
+  const meses=[...new Set(S.ventas.map(v=>String(v.fecha).slice(0,7)).concat([today().slice(0,7)]))].filter(Boolean).sort().reverse();
+  const list=[...S.ventas].filter(v=>String(v.fecha).slice(0,7)===FV.mes).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)));
+  return `<div class="head"><div><h2>Ventas de GLP</h2><p>Lo que sale de tu cisterna de GLP, en galones. La ganancia compara el precio de venta con el costo promedio por galón de tus compras de GLP facturadas (con impuestos, convertidas de kg a galones con ${glpF()} kg/gal).</p></div><button class="btn pri" id="nVen">${ic("plus","currentColor",16,2.5)}Registrar venta</button></div>
+  <div class="grid g4">
+    <div class="card kpi"><div class="lab"><span>Vendido en el mes</span><i class="dot" style="background:#3EC5FF"></i></div><div class="big">${qty(Math.round(gal))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="small muted">${delMes.length} venta(s)</div></div>
+    <div class="card kpi"><div class="lab"><span>Total vendido</span></div><div class="big">${money(tot)}</div><div class="small muted">${gal?`Precio promedio ${money4(tot/gal)}/gal`:"—"}</div></div>
+    <div class="card kpi"><div class="lab"><span>Ganancia estimada</span></div><div class="big ${gan<0?"neg":"pos"}">${money(gan)}</div><div class="small muted">${gal?`${money4(gan/gal)} por galón · ${tot?Math.round(gan/tot*1000)/10:0}%`:"—"}</div></div>
+    <div class="card kpi"><div class="lab"><span>Costo actual por galón</span></div><div class="big" style="font-size:22px">${co.costo?money4(co.costo):"—"}</div><div class="small muted">${co.base==="facturas"?`Promedio de ${qty(Math.round(co.gal))} gal facturados`:co.base==="compras"?"Según compras (aún sin facturas)":"Registra compras de GLP"}</div></div>
+    <div class="card kpi"><div class="lab"><span>GLP disponible estimado</span></div><div class="big ${st.disponible<0?"neg":""}">${qty(Math.round(st.disponible))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="small muted">Comprado ${qty(Math.round(st.comprado))} − vendido ${qty(Math.round(st.vendido))} gal · ≈ ${qty(Math.round(st.disponible*glpF()))} kg</div></div>
+    <div class="card kpi"><div class="lab"><span>Por cobrar</span></div><div class="big" style="font-size:22px;color:${porCobrar?"var(--warn)":"var(--ok)"}">${money(porCobrar)}</div><div class="small muted">Ventas no marcadas como cobradas</div></div>
+  </div>
+  <div class="row"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Mes<select id="fvMes" style="width:auto">${meses.map(m=>`<option value="${m}" ${m===FV.mes?"selected":""}>${mesLargo(m)}</option>`).join("")}</select></label><a class="small" href="#reportes" id="fvRep">Ver más periodos en Reportes</a></div>
+  ${list.length?`<div class="tablewrap"><table><thead><tr><th>Fecha</th><th>Cliente</th><th class="n">Galones</th><th class="n">Precio venta</th><th class="n">Total</th><th class="n">Costo/gal</th><th class="n">Ganancia</th><th>SCOP de venta</th><th>Comprobante</th><th>Cobro</th></tr></thead><tbody>
+  ${list.map(v=>`<tr data-venta="${v.id}" style="cursor:pointer"><td>${fdate(v.fecha)}</td><td style="min-width:200px">${esc((v.cliente&&v.cliente.nombre)||"—")}${v.estado==="Anulada"?' <span class="pill p-bad">Anulada</span>':""}</td><td class="n">${qty(v.galones)}</td><td class="n">${money4(v.precioGal)}</td><td class="n"><b>${money(ventaTotal(v))}</b></td><td class="n muted">${money4(v.costoGal)}</td><td class="n ${ventaGanancia(v)<0?"neg":"pos"}">${money(ventaGanancia(v))}</td><td><span class="mono small">${esc((v.scop&&v.scop.codigo)||"")}</span> ${scopVentaPill(v)}</td><td class="mono small">${v.comprobante&&v.comprobante.numero?esc(`${v.comprobante.tipo||""} ${v.comprobante.serie||""}-${v.comprobante.numero}`):"—"}</td><td>${v.cobro==="cobrado"?'<span class="pill p-ok">Cobrado</span>':'<span class="pill p-warn">Por cobrar</span>'}</td></tr>`).join("")}
+  </tbody></table></div>`:'<div class="card empty">No hay ventas de GLP registradas en este mes.</div>'}`;
+}
+bind.ventas = v=>{
+  $("#nVen",v).addEventListener("click",()=>modalVenta({}));
+  $("#fvMes",v).addEventListener("change",e=>{ FV.mes=e.target.value; render(); });
+  $("#fvRep",v).addEventListener("click",()=>{ REP.vista="ventas"; REP.tipo=""; });
+  $$("[data-venta]",v).forEach(tr=>tr.addEventListener("click",()=>modalVenta(S.ventas.find(x=>x.id===tr.dataset.venta))));
+};
+function modalVenta(v0){
+  const glpU=unidadesDe("glp");
+  const v={fecha:today(), cliente:{nombre:"",ruc:""}, galones:"", precioGal:"", costoGal:"", unidadId:(glpU.find(u=>u.propiedad==="propia")||glpU[0]||{}).id||"", scop:{codigo:"",estado:"pendiente"}, comprobante:{tipo:"Factura",serie:"",numero:""}, cobro:"pendiente", estado:"Registrada", notas:"", ...v0};
+  v.cliente={nombre:"",ruc:"",...(v.cliente||{})}; v.scop={codigo:"",estado:"pendiente",...(v.scop||{})}; v.comprobante={tipo:"Factura",serie:"",numero:"",...(v.comprobante||{})};
+  const selfId=v0&&v0.id; let costoManual=!!(selfId&&v0.costoManual);
+  const ultimoPrecio=()=>{ const u=[...S.ventas].filter(x=>num(x.precioGal)).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)))[0]; return u?num(u.precioGal):""; };
+  if(!selfId && !v.precioGal) v.precioGal=ultimoPrecio();
+  openModal(`<h2>${selfId?"Editar":"Registrar"} venta de GLP</h2>
+   <form id="fv"><div class="fields fac-grid">
+    <label class="f">Fecha de la venta<input type="date" id="vFec" value="${esc(v.fecha)}"></label>
+    <label class="f">Cliente<input id="vCli" list="vClis" value="${esc(v.cliente.nombre)}" placeholder="Razón social del cliente"><datalist id="vClis">${clientesConocidos().map(([n])=>`<option value="${esc(n)}">`).join("")}</datalist></label>
+    <label class="f">RUC del cliente<input id="vRuc" class="mono" inputmode="numeric" maxlength="11" value="${esc(v.cliente.ruc)}"></label>
+    <label class="f">Galones vendidos<input type="number" step="any" min="0" id="vGal" class="mono" value="${esc(v.galones)}"></label>
+    <label class="f">Precio de venta por galón (con impuestos)<input type="number" step="0.0001" min="0" id="vPre" class="mono" value="${esc(v.precioGal)}" placeholder="0.0000"></label>
+    <label class="f">Costo por galón<input type="number" step="0.0001" min="0" id="vCos" class="mono" value="${esc(v.costoGal)}" placeholder="0.0000"><span class="small" id="vCosInfo"></span></label>
+    <label class="f">Unidad que descargó<select id="vUni"><option value="">— Sin unidad —</option>${glpU.map(u=>`<option value="${u.id}" ${u.id===v.unidadId?"selected":""}>${esc(unidadTxt(u))}</option>`).join("")}</select></label>
+    <label class="f">Código SCOP de venta<input id="vScop" class="mono" inputmode="numeric" value="${esc(v.scop.codigo)}" placeholder="Código de autorización"></label>
+    <label class="f">Estado del SCOP<select id="vScopE"><option value="pendiente" ${v.scop.estado==="pendiente"?"selected":""}>Pendiente</option><option value="generado" ${v.scop.estado==="generado"?"selected":""}>Generado</option><option value="cerrado" ${v.scop.estado==="cerrado"?"selected":""}>Cerrado</option></select></label>
+    <label class="f">Comprobante<select id="vCTip">${["Factura","Boleta","Guía de remisión","Sin comprobante"].map(t=>`<option ${v.comprobante.tipo===t?"selected":""}>${t}</option>`).join("")}</select></label>
+    <label class="f">Serie<input id="vCSer" class="mono" value="${esc(v.comprobante.serie)}" placeholder="F001"></label>
+    <label class="f">Número<input id="vCNum" class="mono" value="${esc(v.comprobante.numero)}"></label>
+    <label class="f">Cobro<select id="vCob"><option value="pendiente" ${v.cobro!=="cobrado"?"selected":""}>Por cobrar</option><option value="cobrado" ${v.cobro==="cobrado"?"selected":""}>Cobrado</option></select></label>
+    <label class="f">Estado<select id="vEst"><option ${v.estado!=="Anulada"?"selected":""}>Registrada</option><option ${v.estado==="Anulada"?"selected":""}>Anulada</option></select></label>
+    <label class="f">Notas<input id="vNot" value="${esc(v.notas)}"></label>
+   </div></form>
+   <div class="card" style="padding:14px"><dl class="kv"><dt>Total de la venta</dt><dd class="num"><b id="vTot">—</b></dd><dt>Costo de lo vendido</dt><dd class="num" id="vCT">—</dd><dt>Ganancia estimada</dt><dd class="num" id="vGan">—</dd><dt>Equivale a</dt><dd class="num muted" id="vKg">—</dd></dl></div>
+   <div class="checks" id="vChecks"></div>
+   <div class="row between">${selfId?'<button class="btn danger" id="vDel">Eliminar</button>':"<span></span>"}<div class="row"><button class="btn" data-close>Cancelar</button><button class="btn pri" id="vSave">Guardar venta</button></div></div>`,
+  m=>{
+    const autoCosto=()=>{ const co=costoGlpGal($("#vFec",m).value||today()); if(!costoManual) $("#vCos",m).value=co.costo?(Math.round(co.costo*10000)/10000).toFixed(4):""; $("#vCosInfo",m).textContent=co.costo?`Promedio ${co.base==="facturas"?"facturado":"cotizado"} hasta la fecha: ${money4(co.costo)}/gal${costoManual?" (lo cambiaste a mano)":""}`:"Sin compras de GLP registradas: escribe el costo a mano."; };
+    const calc=()=>{ const g=num($("#vGal",m).value), p=num($("#vPre",m).value), c=num($("#vCos",m).value), out=[];
+      $("#vTot",m).textContent=g&&p?money(g*p):"—"; $("#vCT",m).textContent=g&&c?money(g*c):"—";
+      const gan=g&&p&&c?g*(p-c):null; $("#vGan",m).textContent=gan===null?"—":`${money(gan)} (${money4(p-c)}/gal)`; $("#vGan",m).className="num "+(gan===null?"":gan<0?"neg":"pos");
+      $("#vKg",m).textContent=g?`${qty(Math.round(g*glpF()))} kg (factor ${glpF()} kg/gal)`:"—";
+      if(!g) out.push(["warn","Indica los galones vendidos."]);
+      const u=unidad($("#vUni",m).value); if(u&&g>usableCaps(u)[0]) out.push(["warn",`Supera la carga máxima de la unidad (${qty(usableCaps(u)[0])} gal).`]);
+      const st=stockGlp(); const disp=st.disponible+(selfId?num(v0.galones):0); if(g&&g>disp+0.5) out.push(["warn",`Supera el GLP disponible estimado (${qty(Math.round(disp))} gal). Revisa que todas las compras de GLP estén registradas.`]);
+      if(p&&c&&p<c) out.push(["bad","El precio de venta es menor que el costo: esta venta da pérdida."]);
+      const code=$("#vScop",m).value.trim(); if(code){ const dup=S.ventas.find(x=>x.id!==selfId&&x.scop&&x.scop.codigo===code); if(dup) out.push(["bad",`El SCOP ${code} ya está en la venta del ${fdate(dup.fecha)}.`]); }
+      $("#vChecks",m).innerHTML=out.map(([l,t])=>`<div class="${l}">${esc(t)}</div>`).join(""); return out; };
+    autoCosto(); calc();
+    $("#vFec",m).addEventListener("change",()=>{ autoCosto(); calc(); });
+    $("#vCos",m).addEventListener("input",()=>{ costoManual=true; calc(); $("#vCosInfo",m).textContent="Costo escrito a mano."; });
+    $("#fv",m).addEventListener("input",calc); $("#fv",m).addEventListener("change",calc);
+    $("#vCli",m).addEventListener("change",()=>{ const hit=clientesConocidos().find(([n])=>n===$("#vCli",m).value); if(hit&&!$("#vRuc",m).value) $("#vRuc",m).value=hit[1]; });
+    if(selfId) $("#vDel",m).addEventListener("click",()=>confirmBox("¿Eliminar esta venta?",async()=>{ await remove("ventas",selfId); closeModal(); toast("Venta eliminada."); }));
+    $("#vSave",m).addEventListener("click",async e=>{
+      const ch=calc(), g=num($("#vGal",m).value), p=num($("#vPre",m).value), fecha=$("#vFec",m).value;
+      if(!fechaOk(fecha)||!g||!p||!$("#vCli",m).value.trim()){ toast("Completa fecha, cliente, galones y precio de venta."); return; }
+      if(ch.some(([l,t])=>l==="bad"&&t.startsWith("El SCOP"))){ toast("Ese SCOP de venta ya está registrado."); return; }
+      const ruc=$("#vRuc",m).value.trim(); if(ruc && !/^\d{11}$/.test(ruc)){ toast("El RUC del cliente debe tener 11 dígitos."); return; }
+      const u=unidad($("#vUni",m).value); let scopE=$("#vScopE",m).value; const code=$("#vScop",m).value.trim(); if(code&&scopE==="pendiente") scopE="generado";
+      e.target.disabled=true;
+      try{
+        const {id,...rest}=v;
+        await save("ventas",selfId||null,{...rest, fecha, cliente:{nombre:$("#vCli",m).value.trim(), ruc}, galones:g, precioGal:Math.round(p*10000)/10000, costoGal:Math.round(num($("#vCos",m).value)*10000)/10000, costoManual,
+          unidadId:u?u.id:"", unidad:u?{nombre:u.nombre, placa:u.placa, propiedad:u.propiedad}:null, scop:{codigo:code, estado:scopE},
+          comprobante:{tipo:$("#vCTip",m).value, serie:$("#vCSer",m).value.trim().toUpperCase(), numero:$("#vCNum",m).value.trim()}, cobro:$("#vCob",m).value, estado:$("#vEst",m).value, notas:$("#vNot",m).value.trim(), creado:v.creado||new Date().toISOString()});
+        FV.mes=fecha.slice(0,7); closeModal(); toast("Venta registrada.");
+      }catch(_){ e.target.disabled=false; }
+    });
+  });
+}
+
+
 /* ---- Reportes (solo datos reales: compras, facturas y depósitos; las cotizaciones no entran) ---- */
 const REP={desde:today().slice(0,8)+"01", hasta:today(), rango:"mes", prov:"", prod:"", tipo:"", unidad:"", prop:"", estado:"", scop:"", fact:"", base:"compra", glpU:"kg", vista:"resumen"};
 const MESL=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","setiembre","octubre","noviembre","diciembre"];
@@ -1859,7 +2024,11 @@ function repData(){
   });
   S.depositos.filter(d=>provOk(d.proveedorId)&&!fechaOk(d.fecha)).forEach(d=>pend.push({lvl:"bad", tipo:"Depósito sin fecha válida", dep:d, f:"", prov:d.proveedorId, prod:"", q:0, u:"", det:`Op. ${d.nroOperacion||"s/n"} por ${money(d.monto)}`}));
   const tot={liq:lines.filter(l=>!l.isG).reduce((a,l)=>a+l.q,0), glp:lines.filter(l=>l.isG).reduce((a,l)=>a+l.q,0), fac:facs.reduce((a,f)=>a+facTotal(f),0), perc:facs.reduce((a,f)=>a+num(f.percepcion),0), dep:deps.reduce((a,d)=>a+num(d.monto),0)};
-  return {compras, lines, deps, facs, prods, tot, porProv:grp(l=>l.proveedorId), porProd:grp(l=>l.producto), porMes:grp(l=>String(l.fecha).slice(0,7)).sort((a,b)=>a.k.localeCompare(b.k)), porUnidad:grp(l=>l.compra?(l.compra.unidadId||"__sin"):"__sin"), cuenta, porCompra, pend, hayGlp:lines.some(l=>l.isG), hayLiq:lines.some(l=>!l.isG)};
+  const ventas=REP.tipo==="liquidos"||REP.prov||REP.prod&&!isGlp(REP.prod)?[]:S.ventas.filter(v=>v.estado!=="Anulada"&&inR(v.fecha)&&(!REP.unidad||(REP.unidad==="sin"?!v.unidadId:v.unidadId===REP.unidad))).sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha)));
+  const vt={gal:ventas.reduce((a,v)=>a+num(v.galones),0), total:ventas.reduce((a,v)=>a+ventaTotal(v),0), costo:ventas.reduce((a,v)=>a+num(v.galones)*num(v.costoGal),0), gan:ventas.reduce((a,v)=>a+ventaGanancia(v),0), porCobrar:ventas.filter(v=>v.cobro!=="cobrado").reduce((a,v)=>a+ventaTotal(v),0)};
+  const glpCompradoGal=lines.filter(l=>l.isG).reduce((a,l)=>a+(l.u==="kg"?l.q/glpF():l.q),0);
+  const porCliente=[...ventas.reduce((m,v)=>{ const k=(v.cliente&&v.cliente.nombre)||"Sin nombre"; const g=m.get(k)||{k, ruc:(v.cliente&&v.cliente.ruc)||"", n:0, gal:0, total:0, gan:0, porCobrar:0}; g.n++; g.gal+=num(v.galones); g.total+=ventaTotal(v); g.gan+=ventaGanancia(v); if(v.cobro!=="cobrado") g.porCobrar+=ventaTotal(v); m.set(k,g); return m; },new Map()).values()];
+  return {ventas, vt, glpCompradoGal, porCliente, compras, lines, deps, facs, prods, tot, porProv:grp(l=>l.proveedorId), porProd:grp(l=>l.producto), porMes:grp(l=>String(l.fecha).slice(0,7)).sort((a,b)=>a.k.localeCompare(b.k)), porUnidad:grp(l=>l.compra?(l.compra.unidadId||"__sin"):"__sin"), cuenta, porCompra, pend, hayGlp:lines.some(l=>l.isG), hayLiq:lines.some(l=>!l.isG)};
 }
 function filtrosTxt(){
   const f=[];
@@ -1875,7 +2044,7 @@ function filtrosTxt(){
 }
 const notaBase=()=> REP.base==="compra" ? "Depósitos y facturas vinculados a una compra se cuentan en la fecha de la compra." : "Depósitos y facturas se cuentan en su propia fecha.";
 const unidadNombre=k=> k==="__sin" ? "Sin unidad registrada" : (unidad(k)?unidadTxt(unidad(k)):(S.compras.find(c=>c.unidadId===k)?.unidad?.nombre||"Unidad eliminada"));
-const VISTAS=[["resumen","Resumen"],["proveedores","Por proveedor"],["productos","Por producto"],["meses","Por mes"],["unidades","Por unidad"],["conciliacion","Saldos y estado de cuenta"],["pendientes","Pendientes y revisión"],["detalle","Detalle"],["movimientos","Depósitos y facturas"]];
+const VISTAS=[["resumen","Resumen"],["proveedores","Por proveedor"],["productos","Por producto"],["meses","Por mes"],["unidades","Por unidad"],["conciliacion","Saldos y estado de cuenta"],["pendientes","Pendientes y revisión"],["detalle","Detalle"],["movimientos","Depósitos y facturas"],["ventas","Ventas de GLP"]];
 const qU=(q,u)=>`${qty(Math.round(q*100)/100)} ${esc(u)}`;
 function vReportes(){
   const R=repData(), T=R.tot, GU=REP.glpU;
@@ -1889,7 +2058,7 @@ function vReportes(){
   const volHead=`${R.hayLiq?'<th class="n">Líquidos (gal)</th>':""}${R.hayGlp?`<th class="n">GLP (${GU})</th>`:""}`;
   let body="";
   const vista=REP.vista;
-  if(!R.lines.length && !R.deps.length && !R.facs.length && !R.pend.length) body='<div class="card empty">No hay movimientos con estos filtros. Prueba con otro rango de fechas o quita algún filtro.</div>';
+  if(!R.lines.length && !R.deps.length && !R.facs.length && !R.pend.length && !R.ventas.length) body='<div class="card empty">No hay movimientos con estos filtros. Prueba con otro rango de fechas o quita algún filtro.</div>';
   else if(vista==="resumen"){
     const G=R.porMes, gal=Object.fromEntries(G.map(g=>[g.k,Object.fromEntries(Object.entries(g.porProd).map(([p,q])=>[p,isGlp(p)&&GU==="kg"?q/glpF():q]))]));
     body=`<div class="grid g4">
@@ -1899,6 +2068,7 @@ function vReportes(){
       <div class="card kpi"><div class="lab"><span>Total facturado</span></div><div class="big">${money(T.fac)}</div><div class="small muted">${R.facs.length} factura(s) · incluye percepción</div></div>
       <div class="card kpi"><div class="lab"><span>Percepción incluida (ref.)</span></div><div class="big" style="font-size:22px">${money(T.perc)}</div><div class="small muted">Ya está dentro del total facturado</div></div>
       <div class="card kpi"><div class="lab"><span>Depositado</span></div><div class="big">${money(T.dep)}</div><div class="small muted">${R.deps.length} depósito(s)</div></div>
+      ${R.ventas.length?`<div class="card kpi"><div class="lab"><span>GLP vendido</span><i class="dot" style="background:#3EC5FF"></i></div><div class="big">${qty(Math.round(R.vt.gal))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="small muted">Ventas ${money(R.vt.total)} · ganancia <b class="${R.vt.gan<0?"neg":"pos"}">${money(R.vt.gan)}</b></div></div>`:""}
       <div class="card kpi"><div class="lab"><span>Pendientes y revisión</span></div><div class="big" style="color:${R.pend.length?"var(--warn)":"var(--ok)"}">${R.pend.length}</div><div class="small muted">SCOP, facturas y datos por corregir</div></div>
     </div>
     <div class="flex">
@@ -1927,6 +2097,19 @@ function vReportes(){
   else if(vista==="detalle") body=`<section class="card"><h3>Detalle por producto comprado</h3>${tbl(`<th>Fecha compra</th><th>Proveedor</th><th>Producto</th><th class="n">Cantidad</th><th>Factura</th><th>Fecha factura</th><th class="n">Total facturado</th><th class="n">Precio real</th><th>SCOP</th><th>Unidad</th><th>Estado</th>`,
       R.lines.map(l=>`<tr ${l.compra?`data-compra="${l.compra.id}"`:""} style="cursor:pointer"><td>${fdate(l.fecha)}</td><td>${esc(l.proveedor)}</td><td>${esc(shortProd(l.producto))}</td><td class="n">${qU(l.q,l.u)}${l.qFuente==="compra"?'<div class="small muted">según compra</div>':""}</td><td class="mono small">${l.factura?esc(l.factura.serie+"-"+l.factura.numero):'<span class="p-warn">pendiente</span>'}</td><td class="small">${l.factura?fdate(l.factura.fecha):"—"}</td><td class="n">${l.factura?money(l.facturado):"—"}</td><td class="n">${l.precioReal?money(l.precioReal)+"/"+l.u:"—"}</td><td class="mono small">${esc(l.scop||"—")}${l.scop?` <span class="pill ${l.scopEstado==="cerrado"?"p-ok":"p-warn"}">${l.scopEstado==="cerrado"?"cerrado":"abierto"}</span>`:""}</td><td class="small">${esc(l.compra&&l.compra.unidad?l.compra.unidad.nombre:"—")}</td><td>${l.compra?estadoPill(l.estado):'<span class="pill p-warn">Sin compra</span>'}</td></tr>`).join(""),
       `<tr><td colspan="3"><b>Total</b></td><td class="n"><b>${[R.hayLiq?qU(T.liq,"gal"):"",R.hayGlp?qU(T.glp,GU):""].filter(Boolean).join(" · ")}</b></td><td colspan="2"></td><td class="n"><b>${money(R.lines.reduce((a,l)=>a+l.facturado,0))}</b></td><td colspan="4"></td></tr>`)}</section>`;
+  else if(vista==="ventas") body=`<div class="grid g4">
+      <div class="card kpi"><div class="lab"><span>GLP vendido</span></div><div class="big">${qty(Math.round(R.vt.gal))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="small muted">${R.ventas.length} venta(s) · ≈ ${qty(Math.round(R.vt.gal*glpF()))} kg</div></div>
+      <div class="card kpi"><div class="lab"><span>Total vendido</span></div><div class="big">${money(R.vt.total)}</div><div class="small muted">${R.vt.gal?`Precio promedio ${money4(R.vt.total/R.vt.gal)}/gal`:"—"}</div></div>
+      <div class="card kpi"><div class="lab"><span>Costo de lo vendido</span></div><div class="big">${money(R.vt.costo)}</div><div class="small muted">${R.vt.gal?`Costo promedio ${money4(R.vt.costo/R.vt.gal)}/gal`:"—"}</div></div>
+      <div class="card kpi"><div class="lab"><span>Ganancia estimada</span></div><div class="big ${R.vt.gan<0?"neg":"pos"}">${money(R.vt.gan)}</div><div class="small muted">${R.vt.gal?`${money4(R.vt.gan/R.vt.gal)} por galón · ${R.vt.total?Math.round(R.vt.gan/R.vt.total*1000)/10:0}% de margen`:"—"}</div></div>
+      <div class="card kpi"><div class="lab"><span>GLP comprado vs. vendido</span></div><div class="big" style="font-size:20px">${qty(Math.round(R.glpCompradoGal))} / ${qty(Math.round(R.vt.gal))} gal</div><div class="small muted">Diferencia del periodo ${qty(Math.round(R.glpCompradoGal-R.vt.gal))} gal</div></div>
+      <div class="card kpi"><div class="lab"><span>Por cobrar</span></div><div class="big" style="font-size:22px;color:${R.vt.porCobrar?"var(--warn)":"var(--ok)"}">${money(R.vt.porCobrar)}</div><div class="small muted">De las ventas del periodo</div></div>
+    </div>
+    <section class="card"><h3>Ventas por cliente</h3>${R.porCliente.length?tbl(`<th>Cliente</th><th>RUC</th><th class="n">Ventas</th><th class="n">Galones</th><th class="n">Total vendido</th><th class="n">Ganancia</th><th class="n">Por cobrar</th>`,
+      R.porCliente.map(g=>`<tr><td>${esc(g.k)}</td><td class="mono">${esc(g.ruc||"—")}</td><td class="n">${g.n}</td><td class="n">${qty(Math.round(g.gal))}</td><td class="n">${money(g.total)}</td><td class="n ${g.gan<0?"neg":"pos"}">${money(g.gan)}</td><td class="n">${money(g.porCobrar)}</td></tr>`).join("")):'<div class="empty">Sin ventas de GLP en el periodo.</div>'}</section>
+    <section class="card"><h3>Detalle de ventas de GLP</h3><p class="small muted">Costo por galón = promedio de tus compras de GLP facturadas hasta la fecha de cada venta (con impuestos), convertidas a galones con ${glpF()} kg/gal.</p>${R.ventas.length?tbl(`<th>Fecha</th><th>Cliente</th><th class="n">Galones</th><th class="n">Precio venta</th><th class="n">Total</th><th class="n">Costo/gal</th><th class="n">Ganancia</th><th>SCOP de venta</th><th>Comprobante</th><th>Unidad</th><th>Cobro</th>`,
+      R.ventas.map(v=>`<tr data-venta="${v.id}" style="cursor:pointer"><td>${fdate(v.fecha)}</td><td>${esc((v.cliente&&v.cliente.nombre)||"—")}</td><td class="n">${qty(v.galones)}</td><td class="n">${money4(v.precioGal)}</td><td class="n">${money(ventaTotal(v))}</td><td class="n muted">${money4(v.costoGal)}</td><td class="n ${ventaGanancia(v)<0?"neg":"pos"}">${money(ventaGanancia(v))}</td><td><span class="mono small">${esc((v.scop&&v.scop.codigo)||"")}</span> ${scopVentaPill(v)}</td><td class="mono small">${v.comprobante&&v.comprobante.numero?esc(`${v.comprobante.serie||""}-${v.comprobante.numero}`):"—"}</td><td class="small">${esc((v.unidad&&v.unidad.nombre)||"—")}</td><td>${v.cobro==="cobrado"?'<span class="pill p-ok">Cobrado</span>':'<span class="pill p-warn">Por cobrar</span>'}</td></tr>`).join(""),
+      `<tr><td colspan="2"><b>Total</b></td><td class="n"><b>${qty(Math.round(R.vt.gal))}</b></td><td></td><td class="n"><b>${money(R.vt.total)}</b></td><td></td><td class="n"><b class="${R.vt.gan<0?"neg":"pos"}">${money(R.vt.gan)}</b></td><td colspan="4"></td></tr>`):'<div class="empty">Sin ventas de GLP en el periodo.</div>'}</section>`;
   else if(vista==="movimientos") body=`<section class="card"><h3>Depósitos del periodo</h3><p class="small muted">${notaBase()}</p>${R.deps.length?tbl(`<th>Fecha</th><th>Proveedor</th><th>Banco</th><th>N° operación</th><th class="n">Monto</th><th>Compra</th><th>Validación</th>`,
       R.deps.map(d=>{ const c=S.compras.find(x=>x.id===d.compraId); return `<tr><td>${fdate(d.fecha)}</td><td>${esc(provName(d.proveedorId))}</td><td>${esc(d.banco)}</td><td class="mono">${esc(d.nroOperacion)}</td><td class="n">${money(d.monto,d.moneda)}</td><td class="small">${c?fdate(c.fecha):"A cuenta"}</td><td>${d.estadoValidacion==="validado"?'<span class="pill p-ok">Validado</span>':'<span class="pill p-bad">Observado</span>'}</td></tr>`; }).join(""),
       `<tr><td colspan="4"><b>Total</b></td><td class="n"><b>${money(T.dep)}</b></td><td colspan="2"></td></tr>`):'<div class="empty">Sin depósitos.</div>'}</section>
@@ -1963,6 +2146,7 @@ bind.reportes = v=>{
   $$("[data-rng]",v).forEach(b=>b.addEventListener("click",()=>{ setRango(b.dataset.rng); render(); }));
   $$("[data-vista]",v).forEach(b=>b.addEventListener("click",()=>{ REP.vista=b.dataset.vista; render(); }));
   $$("[data-pfac]",v).forEach(tr=>tr.addEventListener("click",()=>modalFactura(S.facturas.find(f=>f.id===tr.dataset.pfac))));
+  $$("[data-venta]",v).forEach(tr=>tr.addEventListener("click",()=>modalVenta(S.ventas.find(x=>x.id===tr.dataset.venta))));
   const cl=$("#rClear",v); cl&&cl.addEventListener("click",()=>{ Object.assign(REP,{prov:"",prod:"",tipo:"",unidad:"",prop:"",estado:"",scop:"",fact:""}); render(); });
   $("#rPrint",v).addEventListener("click",()=>window.print());
   bindCompraRows(v);
@@ -1983,6 +2167,7 @@ function excelReporte(){
     [{v:"Total facturado (incluye percepción)",s:ST.key},{v:r2(T.fac),s:ST.money},{v:`${R.facs.length} factura(s)`,s:ST.text}],
     [{v:"Percepción incluida (referencial)",s:ST.key},{v:r2(T.perc),s:ST.money},{v:"Ya está dentro del total facturado",s:ST.text}],
     [{v:"Depositado",s:ST.key},{v:r2(T.dep),s:ST.money},{v:`${R.deps.length} depósito(s)`,s:ST.text}],
+    ...(R.ventas.length?[[{v:"GLP vendido (gal)",s:ST.key},{v:Math.round(R.vt.gal*1000)/1000,s:ST.gal},{v:`${R.ventas.length} venta(s)`,s:ST.text}],[{v:"Total vendido",s:ST.key},{v:r2(R.vt.total),s:ST.money},{v:"",s:ST.text}],[{v:"Ganancia estimada de ventas GLP",s:ST.key},{v:r2(R.vt.gan),s:ST.saldo},{v:R.vt.total?`${Math.round(R.vt.gan/R.vt.total*1000)/10}% de margen`:"",s:ST.text}]]:[]),
     [{v:"Pendientes y revisión",s:ST.key},{v:R.pend.length,s:ST.int},{v:"Ver hoja Pendientes",s:ST.text}],
     [],[{v:"Saldo por proveedor",s:ST.section}],
     [{v:"Proveedor",s:ST.head},{v:"Saldo al inicio",s:ST.head},{v:"Depósitos",s:ST.head},{v:"Facturas",s:ST.head},{v:"Saldo al cierre",s:ST.head}],
@@ -2011,6 +2196,10 @@ function excelReporte(){
       R.deps.map(d=>{ const c=S.compras.find(x=>x.id===d.compraId); return [fechaOk(d.fecha)?d.fecha:"",d.hora||"",provName(d.proveedorId),d.banco||"",d.nroOperacion||"",num(d.monto),d.moneda||"PEN",c?c.fecha:"",d.estadoValidacion==="validado"?"Validado":"Observado",(d.observaciones||[]).join(" · ")]; })),
     X.table("Facturas","FACTURAS",sub+" · "+notaBase(),[{h:"Fecha",t:"date",w:11},{h:"Proveedor",w:26},{h:"RUC",w:14},{h:"Producto",w:20},{h:"Serie",w:8},{h:"Número",w:10},{h:"Cantidad",t:"gal",w:11},{h:"Unidad",w:8},{h:"Percepción (ref.)",t:"money",w:13,sum:1},{h:"Total facturado",t:"money",w:16,sum:1},{h:"Fecha de la compra",t:"date",w:12},{h:"SCOP del producto",w:15}],
       R.facs.map(f=>{ const c=S.compras.find(x=>x.id===f.compraId), s=c?scopsOf(c).find(z=>z.producto===f.producto):null, d=qDisp(f.producto||"",f.galones,unitOf(f.producto||"",f.unidad),GU); return [fechaOk(f.fecha)?f.fecha:"",provName(f.proveedorId),prov(f.proveedorId)?.ruc||"",f.producto||"",f.serie,f.numero,num(f.galones)?Math.round(d.q*1000)/1000:"",d.u,num(f.percepcion),facTotal(f),c?c.fecha:"",s?s.codigo:""]; })),
+    ...(R.ventas.length?[X.table("Ventas GLP","VENTAS DE GLP (EN GALONES)",sub+` · Costo/gal = promedio de compras de GLP facturadas hasta la fecha de venta; factor ${glpF()} kg/gal`,[{h:"Fecha",t:"date",w:11},{h:"Cliente",w:30},{h:"RUC cliente",w:14},{h:"Galones",t:"gal",w:11,sum:1},{h:"Equivale a kg",t:"gal",w:12,sum:1},{h:"Precio venta (S/ x gal)",t:"price",w:14},{h:"Total venta",t:"money",w:15,sum:1},{h:"Costo (S/ x gal)",t:"price",w:14},{h:"Costo de lo vendido",t:"money",w:15,sum:1},{h:"Ganancia",t:"saldo",w:15,sum:1},{h:"Margen",t:"pct",w:9},{h:"SCOP de venta",w:15},{h:"Estado SCOP",w:11},{h:"Comprobante",w:18},{h:"Unidad",w:24},{h:"Cobro",w:10}],
+      R.ventas.map(v=>[v.fecha,(v.cliente&&v.cliente.nombre)||"",(v.cliente&&v.cliente.ruc)||"",num(v.galones),Math.round(num(v.galones)*glpF()*1000)/1000,num(v.precioGal),ventaTotal(v),num(v.costoGal),r2(num(v.galones)*num(v.costoGal)),ventaGanancia(v),ventaTotal(v)?ventaGanancia(v)/ventaTotal(v):"",(v.scop&&v.scop.codigo)||"",{pendiente:"Pendiente",generado:"Abierto",cerrado:"Cerrado"}[(v.scop&&v.scop.estado)||"pendiente"],v.comprobante&&v.comprobante.numero?`${v.comprobante.tipo||""} ${v.comprobante.serie||""}-${v.comprobante.numero}`:"",(v.unidad&&v.unidad.nombre)||"",v.cobro==="cobrado"?"Cobrado":"Por cobrar"])),
+      X.table("Ventas por cliente","VENTAS DE GLP POR CLIENTE",sub,[{h:"Cliente",w:30},{h:"RUC",w:14},{h:"Ventas",t:"int",w:9,sum:1},{h:"Galones",t:"gal",w:12,sum:1},{h:"Total vendido",t:"money",w:15,sum:1},{h:"Ganancia",t:"saldo",w:15,sum:1},{h:"Por cobrar",t:"money",w:15,sum:1}],
+      R.porCliente.map(g=>[g.k,g.ruc,g.n,Math.round(g.gal*1000)/1000,r2(g.total),r2(g.gan),r2(g.porCobrar)]))]:[]),
     X.table("Pendientes","PENDIENTES Y REVISIÓN DE DATOS",sub,[{h:"Tipo",w:28},{h:"Fecha",t:"date",w:11},{h:"Proveedor",w:26},{h:"Producto",w:20},{h:"Cantidad",t:"gal",w:11},{h:"Unidad",w:8},{h:"Detalle",t:"w",w:50}],
       R.pend.map(x=>[x.tipo,x.f||"",provName(x.prov),x.prod||"",x.q||"",x.q?x.u:"",x.det])),
   ];
@@ -2243,6 +2432,9 @@ function migrar(){
   if(!S.empresa.glpKgV6){ const f=glpF();
     S.proveedores.forEach(p=>(p.productos||[]).forEach(x=>{ if(isGlp(x.nombre) && (x.unidad||"gal")!=="kg"){ x.precio=num(x.precio)?Math.round(num(x.precio)/f*10000)/10000:0; x.unidad="kg"; x.actualizado=""; } }));
     S.empresa.glpKgV6=true; cambio=true; }
+  if(!S.empresa.glpPrecioV7){
+    S.proveedores.forEach(p=>{ const f=1+num(p.percepcionPct)/100; (p.productos||[]).forEach(x=>{ if(isGlp(x.nombre)&&num(x.precio)) x.precio=Math.round(num(x.precio)*f*10000)/10000; }); (p.historial||[]).forEach(h=>{ if(isGlp(h.producto)){ h.anterior=Math.round(num(h.anterior)*f*10000)/10000; h.precio=Math.round(num(h.precio)*f*10000)/10000; } }); });
+    S.empresa.glpPrecioV7=true; cambio=true; }
   if(!S.empresa.codigosV5){ ["usuarioScop","registroGLP","usuarioScopGLP"].forEach(k=>{ if(!S.empresa[k]) S.empresa[k]=DEF_EMP[k]; }); S.empresa.codigosV5=true; cambio=true; }
   return cambio;
 }
@@ -2252,6 +2444,7 @@ render();
   try{
     idb=await openIDB();
     const d=await idbGet("kv","data");
+    if(!d){ Object.assign(S.empresa,{unidadesMigradas:true, glpKgV6:true, glpPrecioV7:true}); }
     if(d){ S.empresa=d.empresa||{}; S.portales=d.portales||{}; COLS.forEach(c=>S[c]=Array.isArray(d[c])?d[c]:[]); if(migrar()) setTimeout(()=>persist().catch(()=>{}),0); }
     lastBackup=(await idbGet("kv","lastBackup"))||"";
     dirHandle=(await idbGet("kv","dirHandle"))||null;
