@@ -144,6 +144,22 @@ form .fields.fac-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
 .opt.best{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
 .opt .nm{flex:1 1 180px;min-width:0}
 .opt .amt{flex:0 0 auto;text-align:right}
+.gb-leg{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted);margin:2px 0 8px}.gb-leg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.gb{padding:22px 0 0 30px}
+.gb-plot{position:relative;height:230px;display:flex;gap:4%;border-bottom:1px solid var(--line);margin-bottom:58px}
+.gb-tick{position:absolute;left:0;right:0;border-top:1px dashed var(--line);height:0}.gb-tick span{position:absolute;left:-30px;top:-8px;width:24px;text-align:right;font-size:11px;color:var(--muted)}
+.gb-tick:first-child{border-top:0}
+.gb-g{flex:1;position:relative;display:flex;flex-direction:column;justify-content:flex-end;padding:0 3%}
+.gb-bars{display:flex;gap:3px;align-items:flex-end;height:100%;justify-content:center}
+.gb-c{flex:1;max-width:72px;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;position:relative;cursor:default}
+.gb-c i{display:block;width:100%;border-radius:4px 4px 0 0;min-height:2px}
+.gb-v{font-size:clamp(9px,1.05vw,12px);color:var(--ink);margin-bottom:4px;white-space:nowrap}
+.gb-lab{position:absolute;top:100%;left:0;right:0;text-align:center;padding-top:8px;display:flex;flex-direction:column;gap:2px;font-size:13px;line-height:1.25}
+.gb-d{color:var(--ok);font-size:12px}
+.gb-v.p-warn{color:var(--warn)}
+.gb-h{margin:6px 0 0;font-size:14px}
+.gb-glp{border-top:1px solid var(--line);padding-top:10px;font-size:13px;color:var(--muted)}.gb-glp b{color:var(--ink)}
+@media (max-width:640px){.gb{padding-left:24px}.gb-tick span{left:-26px;width:20px;font-size:10px}.gb-lab{font-size:11.5px}.gb-d{font-size:10.5px}.gb-plot{height:200px;margin-bottom:76px}}
 .pcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
 .pcard{background:var(--soft);border-radius:14px;border-top:3px solid var(--line);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
 .prow{display:flex;flex-direction:column;gap:4px}
@@ -381,7 +397,8 @@ const glpConImp=(v,pct)=>num(v)*1.18*(1+num(pct)/100);
 const precioSinImp=p=>num(p)/1.18;
 const precioConPer=(p,pct)=>num(p)*(1+num(pct)/100);
 /* percepción de una cotización: en líquidos se suma; en GLP ya está incluida en el precio */
-function percCot(lines,pct){ let add=0, incl=0; lines.forEach(l=>{ const imp=num(l.importe); if(isGlp(l.producto)) incl+=imp-imp/(1+num(pct)/100); else add+=imp*num(pct)/100; }); return {add:r2(add), incl:r2(incl)}; }
+/* v9: los precios referenciales ya incluyen todos los impuestos: la cotización no suma ni muestra percepción */
+function percCot(){ return {add:0, incl:0}; }
 function saldoProveedor(pid){
   const p = prov(pid) || {};
   const dep = S.depositos.filter(d=>d.proveedorId===pid).reduce((a,d)=>a+num(d.monto),0);
@@ -730,24 +747,43 @@ function priceSeries(prod){
 
 /* ============ Vistas ============ */
 const RES={prod:""};
-/* Precios de hoy: una tarjeta por producto con todos los proveedores, del más barato al más caro */
+/* Precios de hoy (v9, opción A): barras agrupadas — un grupo por producto, una barra por proveedor (color fijo por proveedor) */
+const PROV_COL=["#3F8AE8","#C98210","#9A6FE0","#2BB3A3","#E0607E","#8C9BB8"];
+const provCol=pid=>{ const i=S.proveedores.findIndex(p=>p.id===pid); return PROV_COL[(i<0?0:i)%PROV_COL.length]; };
+const shortProv=n=>String(n||"").replace(/\b(S\.?A\.?C?\.?|S\.?R\.?L\.?|E\.?I\.?R\.?L\.?)\s*$/i,"").replace(/^PETROLEOS DEL PERU\s*-\s*/i,"").replace(/\bCOMERCIAL\b|\bCORPORACION\b/ig,"").replace(/\s+/g," ").trim();
+function preciosDe(prod){
+  const u=isGlp(prod)?"kg":"gal";
+  return S.proveedores.map(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); if(!x) return null; const v=precioEn(x,u); if(!v) return null;
+    const h=[...(p.historial||[])].filter(z=>z.producto===prod&&num(z.anterior)>0).sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha))).pop();
+    const prevV=h&&Math.abs(num(h.precio)-num(x.precio))<0.00005?num(h.anterior):null;
+    return {p, v, d:x.actualizado, ch:prevV!==null?v-precioEn({...x,precio:prevV},u):null}; }).filter(Boolean);
+}
+function barrasGrupo(prods, u){
+  const grupos=prods.map(prod=>({prod, rows:preciosDe(prod)})).filter(g=>g.rows.length);
+  const max=Math.max(...grupos.flatMap(g=>g.rows.map(r=>r.v)));
+  const step=max>12?6:max>4?2:1, top=Math.ceil(max*1.08/step)*step, ticks=[]; for(let t=0;t<=top+1e-9;t+=step) ticks.push(t);
+  return `<div class="gb"><div class="gb-plot">
+    ${ticks.map(t=>`<div class="gb-tick" style="bottom:${(t/top*100).toFixed(2)}%"><span>${t}</span></div>`).join("")}
+    ${grupos.map(g=>{ const mn=Math.min(...g.rows.map(r=>r.v)), mx=Math.max(...g.rows.map(r=>r.v)), best=g.rows.find(r=>r.v===mn);
+      return `<div class="gb-g"><div class="gb-bars">${g.rows.map(r=>{ const old=!r.d||daysBetween(r.d,today())>7;
+        const tip=`${r.p.nombre} · ${g.prod}: ${money4(r.v)} por ${u}${r.ch!==null&&Math.abs(r.ch)>=0.00005?` · ${r.ch>0?"subió":"bajó"} ${Math.abs(r.ch).toFixed(4)}`:""} · ${r.d?"al "+fdate(r.d):"sin fecha"}${old?" (revisar)":""}`;
+        return `<div class="gb-c" title="${esc(tip)}"><span class="gb-v mono${old?" p-warn":""}">${r.v.toFixed(4)}</span><i style="height:${(r.v/top*100).toFixed(2)}%;background:${provCol(r.p.id)}"></i></div>`; }).join("")}</div>
+        <div class="gb-lab"><b>${esc(g.prod)}</b>${g.rows.length>1&&mx>mn?`<span class="gb-d">${esc(shortProv(best.p.nombre))} −${(mx-mn).toFixed(4)}/${u}</span>`:g.rows.length>1?`<span class="small muted">mismo precio</span>`:`<span class="small muted">un solo proveedor</span>`}</div></div>`; }).join("")}
+  </div></div>`;
+}
 function preciosHoyHtml(){
-  const prods=knownProducts().filter(prod=>S.proveedores.some(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); return x&&num(x.precio)>0; }));
-  if(!prods.length) return '<div class="empty">Registra los precios de tus proveedores en Proveedores y precios para ver la comparación.</div>';
-  return `<div class="pcards">${prods.map(prod=>{
-    const u=isGlp(prod)?"kg":"gal";
-    const rows=S.proveedores.map(p=>{ const x=(p.productos||[]).find(q=>q.nombre===prod); if(!x) return null; const v=precioEn(x,u); if(!v) return null;
-      const h=[...(p.historial||[])].filter(z=>z.producto===prod&&num(z.anterior)>0).sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha))).pop();
-      const prevV=h&&Math.abs(num(h.precio)-num(x.precio))<0.00005?num(h.anterior):null;
-      return {p, v, d:x.actualizado, prev:prevV!==null?precioEn({...x,precio:prevV},u):null}; }).filter(Boolean).sort((a,b)=>a.v-b.v);
-    const mn=rows[0].v, mx=rows.at(-1).v, varios=rows.length>1;
-    return `<div class="pcard" style="border-top-color:${pcol(prod)}"><div class="row between"><b>${esc(prod)}</b><span class="small muted">S/ por ${u}, con impuestos</span></div>
-      ${rows.map((r,i)=>{ const w=varios&&mx>mn?40+60*(r.v-mn)/(mx-mn):100, best=varios&&i===0, old=!r.d||daysBetween(r.d,today())>7, ch=r.prev!==null?r.v-r.prev:null;
-        return `<div class="prow"><div class="row between small"><span>${esc(r.p.nombre)}</span><span>${best?'<span class="pill p-ok">Más barato</span>':varios?`<span class="p-bad">+${(r.v-mn).toFixed(4)}</span>`:""}</span></div>
-        <div class="pbar"><i style="width:${w.toFixed(1)}%;background:${best?"var(--ok)":"var(--accent)"}"></i><b class="mono">${money4(r.v)}</b></div>
-        <div class="small muted">${ch!==null&&Math.abs(ch)>=0.00005?`<span style="color:${ch>0?"var(--bad)":"var(--ok)"}">${ch>0?"▲ subió":"▼ bajó"} ${Math.abs(ch).toFixed(4)}</span> · `:""}<span class="${old?"p-warn":""}">${r.d?"al "+fdate(r.d):"sin fecha"}${old?" · revisar":""}</span></div></div>`; }).join("")}
-      ${varios?`<div class="small" style="border-top:1px solid var(--line);padding-top:8px">Diferencia: <b class="mono">${(mx-mn).toFixed(4)}</b> por ${u} · <b>${money((mx-mn)*1000)}</b> cada 1,000 ${u}</div>`:'<div class="small muted">Solo un proveedor tiene este precio.</div>'}
-    </div>`; }).join("")}</div>`;
+  const conPrecio=prod=>preciosDe(prod).length>0;
+  const liq=knownProducts().filter(x=>!isGlp(x)&&conPrecio(x)), glp=knownProducts().filter(x=>isGlp(x)&&conPrecio(x));
+  if(!liq.length&&!glp.length) return '<div class="empty">Registra los precios de tus proveedores en Proveedores y precios para ver la comparación.</div>';
+  const glpMulti0=glp.some(prod=>preciosDe(prod).length>1);
+  const usados=S.proveedores.filter(p=>liq.concat(glpMulti0?glp:[]).some(prod=>preciosDe(prod).some(r=>r.p.id===p.id)));
+  const leyenda=`<div class="gb-leg">${usados.map(p=>`<span><i style="background:${provCol(p.id)}"></i>${esc(p.nombre)}</span>`).join("")}</div>`;
+  const glpRows=glp.flatMap(prod=>preciosDe(prod).map(r=>({...r,prod})));
+  const glpMulti=glp.some(prod=>preciosDe(prod).length>1);
+  const glpTxt=!glp.length?"":glpMulti?`<h4 class="gb-h">GLP · S/ por kg con impuestos</h4>${barrasGrupo(glp,"kg")}`
+    :`<div class="gb-glp">GLP granel (por kg): ${glpRows.map(r=>`<b>${esc(r.p.nombre)} ${money4(r.v)}</b>${r.ch!==null&&Math.abs(r.ch)>=0.00005?` <span style="color:${r.ch>0?"var(--bad)":"var(--ok)"}">${r.ch>0?"▲":"▼"} ${Math.abs(r.ch).toFixed(4)}</span>`:""}`).join(" · ")} — no hay otro proveedor para comparar.</div>`;
+  const stale=liq.concat(glp).some(prod=>preciosDe(prod).some(r=>!r.d||daysBetween(r.d,today())>7));
+  return `${leyenda}${liq.length?`<div class="small muted" style="margin:-2px 0 4px">Combustibles líquidos · S/ por galón con impuestos. Toca o pasa el mouse sobre una barra para ver la fecha y si subió o bajó.</div>${barrasGrupo(liq,"gal")}`:""}${glpTxt}${stale?'<div class="small p-warn">Los precios en amarillo tienen más de 7 días: actualízalos antes de comprar.</div>':""}`;
 }
 function vResumen(){
   const alerts=buildAlerts();
@@ -760,7 +796,7 @@ function vResumen(){
     return `<div class="card kpi"><div class="lab"><span>${esc(p)}</span><i class="dot" style="background:${pcol(p)}"></i></div><div class="big">${qty(Math.round(c))} <span style="font-size:14px;color:var(--muted)">${isGlp(p)?"kg":"gal"}</span></div><div class="foot"><span class="delta" style="color:${pcol(p)}">${d===null?(c?"Nuevo este mes":"Sin compras este mes"):(d>=0?"▲ ":"▼ ")+Math.abs(d)+"% vs. "+mLabel(prev).toLowerCase()}</span>${svgSpark(months.map(m=>G.byM[m]?.[p]||0),pcol(p))}</div></div>`; }).join("");
   const vMes=S.ventas.filter(v=>v.estado!=="Anulada"&&String(v.fecha).slice(0,7)===cur), vGal=vMes.reduce((a,v)=>a+num(v.galones),0), vGan=vMes.reduce((a,v)=>a+ventaGanancia(v),0);
   const kVentas=S.ventas.length?`<a class="card kpi" href="#ventas" style="text-decoration:none;color:inherit"><div class="lab"><span>Ventas GLP del mes</span><i class="dot" style="background:#3EC5FF"></i></div><div class="big">${qty(Math.round(vGal))} <span style="font-size:14px;color:var(--muted)">gal</span></div><div class="foot"><span class="delta" style="color:${vGan<0?"var(--bad)":"var(--ok)"}">Ganancia ${money(vGan)}</span>${svgSpark(months.map(m=>S.ventas.filter(v=>v.estado!=="Anulada"&&String(v.fecha).slice(0,7)===m).reduce((a,v)=>a+num(v.galones),0)),"#3EC5FF")}</div></a>`:"";
-  const kMonto=`<div class="card kpi"><div class="lab"><span>Facturado del mes</span><i class="dot" style="background:var(--ok)"></i></div><div class="big">${money(G.monto[cur]||0)}</div><div class="foot"><span class="delta" style="color:var(--ok)">${S.facturas.filter(f=>String(docFecha(f)).slice(0,7)===cur).length} factura(s) · incluye percepción</span>${svgSpark(months.map(m=>G.monto[m]||0),"#4ADE80")}</div></div>`;
+  const kMonto=`<div class="card kpi"><div class="lab"><span>Facturado del mes</span><i class="dot" style="background:var(--ok)"></i></div><div class="big">${money(G.monto[cur]||0)}</div><div class="foot"><span class="delta" style="color:var(--ok)">${S.facturas.filter(f=>String(docFecha(f)).slice(0,7)===cur).length} factura(s)</span>${svgSpark(months.map(m=>G.monto[m]||0),"#4ADE80")}</div></div>`;
   const totProd=prods.map(p=>({label:p,val:months.reduce((a,m)=>a+(G.byMgal[m]?.[p]||0),0),col:pcol(p)})).filter(x=>x.val>0);
   const totGal=totProd.reduce((a,x)=>a+x.val,0);
   const gauges=S.proveedores.map(p=>{ const s=saldoProveedor(p.id); const cs=S.compras.filter(c=>c.proveedorId===p.id&&c.estado!=="Anulada"&&facturasCompra(c.id).length); const avg=cs.length?cs.reduce((a,c)=>a+facturasCompra(c.id).reduce((x,f)=>x+facTotal(f),0),0)/cs.length:0;
@@ -769,7 +805,7 @@ function vResumen(){
 
   const scopRows=[...S.compras].filter(c=>c.estado!=="Anulada").sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha))).slice(0,5);
   const ult=[...S.compras].sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha))).slice(0,6);
-  return `<div class="head"><div><h2>Panel de compras</h2><p>${mesNombre[0].toUpperCase()+mesNombre.slice(1)} · saldo por proveedor = saldo inicial + depósitos − facturas (con percepción).</p></div>
+  return `<div class="head"><div><h2>Panel de compras</h2><p>${mesNombre[0].toUpperCase()+mesNombre.slice(1)} · saldo por proveedor = saldo inicial + depósitos − facturas.</p></div>
     <div class="row"><button class="btn" id="rVoucher">${ic("cam")}Subir voucher</button><a class="btn" href="#comparar">${ic("scale")}Comparar precios</a><a class="btn pri" href="#nueva">${ic("plus","currentColor",18,2.5)}Nueva compra</a></div></div>
     ${!S.proveedores.length?`<div class="card"><h3>Empieza aquí</h3><p class="muted">Registra los datos de tu empresa y tu cisterna, y luego tus proveedores de combustibles líquidos y GLP con sus cuentas y precios. Los gráficos se llenan solos con cada compra.</p><div class="row"><a class="btn pri" href="#empresa">Mi empresa</a><a class="btn" href="#proveedores">Agregar proveedor</a></div></div>`:""}
     <div class="grid g4">${kpis}${kMonto}${kVentas}</div>
@@ -1008,8 +1044,6 @@ function vNueva(){
    <div class="card side-col">
     <h3>Monto aproximado</h3>
     <dl class="kv"><dt>Total compra (con impuestos)</dt><dd class="num"><b>${money(c2.total)}</b></dd>
-      ${c2.percIncl?`<dt>Percepción incluida en el precio</dt><dd class="num muted">${money(c2.percIncl)}</dd>`:""}
-      ${c2.percepcion||!c2.percIncl?`<dt>Percepción ${c2.pct?`(${c2.pct}%)`:""} a sumar</dt><dd class="num">${money(c2.percepcion)}</dd>`:""}
       <dt>Saldo a favor aplicado</dt><dd class="num pos">− ${money(c2.aplicar)}</dd>
       ${c2.deuda?`<dt>Deuda pendiente</dt><dd class="num neg">+ ${money(c2.deuda)}</dd>`:""}
     </dl>
@@ -1039,7 +1073,7 @@ bind.nueva = v=>{
   $$("[data-copy]",v).forEach(b=>b.addEventListener("click",()=>copy(b.dataset.copy)));
   $("#cCopy",v).addEventListener("click",()=>{
     const c=cotCalc(), u=usaUnidad(c.p)?unidad(PLANS[c.tipo].unidadId):null;
-    copy(`Compra ${c.p.nombre} – ${fdate(COT.fecha)}\n`+(u?`Unidad: ${unidadTxt(u)}\n`+PLANS[c.tipo].comps.map((x,i)=>`${c.tipo==="glp"?"Tanque":"C"+(i+1)}: ${x.prod||"vacío"} ${x.prod?qty(x.cant)+" gal":""}`).join("\n")+"\n":"")+c.lines.map(l=>`${l.producto}: ${qty(l.cantidad)} ${l.unidad} x ${money(l.precio)} = ${money(l.importe)}`).join("\n")+`\nTotal: ${money(c.total)}\nPercepción: ${money(c.percepcion)}\nSaldo a favor: -${money(c.aplicar)}\nA depositar: ${money(c.depositar)}`);
+    copy(`Compra ${c.p.nombre} – ${fdate(COT.fecha)}\n`+(u?`Unidad: ${unidadTxt(u)}\n`+PLANS[c.tipo].comps.map((x,i)=>`${c.tipo==="glp"?"Tanque":"C"+(i+1)}: ${x.prod||"vacío"} ${x.prod?qty(x.cant)+" gal":""}`).join("\n")+"\n":"")+c.lines.map(l=>`${l.producto}: ${qty(l.cantidad)} ${l.unidad} x ${money(l.precio)} = ${money(l.importe)}`).join("\n")+`\nTotal: ${money(c.total)}\nSaldo a favor: -${money(c.aplicar)}\nA depositar: ${money(c.depositar)}`);
   });
   $("#cSave",v).addEventListener("click",async e=>{
     const c=cotCalc();
@@ -1082,7 +1116,7 @@ function rankHtml(opts, kind, tipo){
       <div class="small muted">${o.lines.map(l=>`${shortProd(l.producto)} ${num(l.precio)?`${money4(l.precio)}/${l.unidad}`:"—"}`).join(" · ")}${o.sp>0?` · saldo a favor ${money(o.sp)}`:o.sp<0?` · debes ${money(-o.sp)}`:""}</div>
       ${o.total&&!o.falta.length?`<div class="track"><i style="width:${(o.total/max*100).toFixed(1)}%;background:${isBest?"var(--ok)":"var(--accent)"}"></i></div>`:""}</div>
     <div class="amt"><div class="small muted">Total compra</div><div class="mono" style="font-size:19px;font-weight:700">${o.falta.length?"—":money(o.total)}</div>${!isBest&&best&&!o.falta.length?`<div class="small p-bad">+ ${money(o.total-best.total)}</div>`:""}</div>
-    <div class="amt"><div class="small muted">A depositar</div><div class="mono" style="font-size:15px">${o.falta.length?"—":money(o.depositar)}</div><div class="small muted">${o.percepcion?`+ percepción ${money(o.percepcion)}`:"percepción incluida"}</div></div>
+    <div class="amt"><div class="small muted">A depositar</div><div class="mono" style="font-size:15px">${o.falta.length?"—":money(o.depositar)}</div>${o.aplicar>0?`<div class="small muted">usa saldo a favor ${money(o.aplicar)}</div>`:o.deuda>0?`<div class="small p-bad">incluye deuda ${money(o.deuda)}</div>`:""}</div>
     <button class="btn sm ${isBest?"pri":""}" data-buy="${o.p.id}" data-buytipo="${tipo}" ${o.falta.length?"disabled":""}>Comprar aquí</button>
   </div>`; }).join("")}</div>`;
 }
@@ -1108,7 +1142,7 @@ function vComparar(){
     ${hayUG?`<div class="fields">${unitSelect("glp","cmpUG")}</div>${tankEditor("glp")}${rankHtml(glpOpts,"GLP","glp")}`
     :`<div class="row"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Kilogramos de GLP a comprar<input type="number" min="0" id="cmpGlp" value="${esc(CMP.glp)}" placeholder="0" style="width:120px"></label><a class="small" href="#unidades">o registra tu unidad de GLP</a></div>${num(CMP.glp)>0?rankHtml(glpOpts,"GLP","glp"):'<div class="empty">Escribe cuántos kilogramos de GLP piensas comprar.</div>'}`}
   </section>
-  <div class="small muted">El total compara precio con impuestos × cantidad. En líquidos la percepción del proveedor se suma aparte al monto a depositar; en GLP ya está dentro del precio. El monto a depositar descuenta tu saldo a favor con cada proveedor.</div>`;
+  <div class="small muted">El total es precio con impuestos × cantidad. El monto a depositar es ese total menos tu saldo a favor con cada proveedor (o más lo que le debas).</div>`;
 }
 bind.comparar = v=>{
   bindTank(v, renderKeep);
@@ -1172,7 +1206,7 @@ function modalCompra(id){
       <td><input class="mono" data-sc="${k}" inputmode="numeric" value="${esc(s.codigo)}" placeholder="Código de autorización" aria-label="SCOP de ${esc(i.producto)}" style="min-width:150px"></td>
       <td><select data-se="${k}" style="min-width:125px" aria-label="Estado SCOP de ${esc(i.producto)}"><option value="pendiente" ${s.estado==="pendiente"?"selected":""}>Pendiente</option><option value="generado" ${s.estado==="generado"?"selected":""}>Generado</option><option value="cerrado" ${s.estado==="cerrado"?"selected":""}>Cerrado</option></select></td>
       <td style="white-space:nowrap">${f?`<button class="btn sm ghost" data-fe="${f.id}" style="white-space:nowrap"><span class="mono">${esc(f.serie)}-${esc(f.numero)}</span> · ${money(facTotal(f))}</button>`:`<button class="btn sm" data-fn="${esc(i.producto)}">+ Factura</button>`}</td></tr>`; }).join("")}
-    <tr><td colspan="2" class="muted">Cotizado con percepción (referencial)</td><td class="n muted">${money(num(c.total)+num(c.percepcion))}</td><td colspan="2" class="small"><b>Total facturado</b></td><td class="n"><b>${money(facturasCompra(id).reduce((a,f)=>a+facTotal(f),0))}</b></td></tr>
+    <tr><td colspan="2" class="muted">Cotizado (referencial)</td><td class="n muted">${money(num(c.total))}</td><td colspan="2" class="small"><b>Total facturado</b></td><td class="n"><b>${money(facturasCompra(id).reduce((a,f)=>a+facTotal(f),0))}</b></td></tr>
    </tbody></table></div>
    ${sinProd.length?`<div class="small p-warn">Hay ${sinProd.length} factura(s) antigua(s) de esta compra sin producto asignado: ábrelas en Facturas y elige su producto.</div>`:""}
    ${Array.isArray(c.carga)&&c.carga.some(x=>x.producto)?`<div class="small"><b>Carga:</b> ${c.carga.map(x=>`${glp?"Tanque":"C"+x.comp} (${qty(x.capacidad)}): ${x.producto?`${esc(shortProd(x.producto))} ${qty(x.cantidad)} gal`:"vacío"}`).join(" · ")}</div>`:""}
@@ -1444,7 +1478,7 @@ bind.facturas = v=>{
   $$("[data-edit]",v).forEach(b=>b.addEventListener("click",()=>modalFactura(S.facturas.find(f=>f.id===b.dataset.edit))));
 };
 function itemDe(c,prod){ return c ? (c.items||[]).find(i=>i.producto===prod) : null; }
-function esperadoFactura(c,prod){ const it=itemDe(c,prod); if(!it) return 0; return isGlp(prod)&&c.glpPrecioConPer ? r2(num(it.importe)) : r2(num(it.importe)*(1+num(c.percepcionPct)/100)); }
+function esperadoFactura(c,prod){ const it=itemDe(c,prod); if(!it) return 0; return r2(num(it.importe)); }
 function modalFactura(f0){
   const f={proveedorId:"", compraId:"", producto:"", serie:"", numero:"", fecha:today(), galones:"", percepcion:"", total:"", ...f0};
   if(f0 && f0.id && !f0.incluyePercepcion) f.total=facTotal(f0);
@@ -1485,7 +1519,7 @@ function modalFactura(f0){
         if(S.facturas.some(o=>o.id!==selfId&&o.compraId===c.id&&o.producto===x.producto)) out.push(["bad",`${x.producto} ya tiene factura registrada en esta compra.`]);
         const it=itemDe(c,x.producto);
         if(it){ if(x.galones && Math.abs(x.galones-num(it.cantidad))>0.5) out.push(["warn",`Cantidad distinta a la compra (${qty(it.cantidad)} ${unitOf(x.producto,it.unidad)} de ${shortProd(x.producto)}).`]);
-          const esp=esperadoFactura(c,x.producto); if(x.total){ const d=r2(x.total-esp); out.push(Math.abs(d)<=1?["ok",`Coincide con lo cotizado para ${shortProd(x.producto)} (${money(esp)} con percepción).`]:["warn",`Diferencia con lo cotizado para ${shortProd(x.producto)} (${money(esp)}): ${d>0?"+":""}${money(d)} por precio del día, impuestos o cantidad.`]); } }
+          const esp=esperadoFactura(c,x.producto); if(x.total){ const d=r2(x.total-esp); out.push(Math.abs(d)<=1?["ok",`Coincide con lo cotizado para ${shortProd(x.producto)} (${money(esp)}).`]:["warn",`Diferencia con lo cotizado para ${shortProd(x.producto)} (${money(esp)}): ${d>0?"+":""}${money(d)} por precio del día, impuestos o cantidad.`]); } }
       }
       $("#checks",m).innerHTML=out.map(([l,t])=>`<div class="${l}">${esc(t)}</div>`).join(""); return out; };
     fillComp(); fillProd(); prefill(); check();
